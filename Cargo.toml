@@ -1,7 +1,12 @@
+[workspace]
+members = [".", "bin"]
+
 [package]
 name = "quill"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+kurbo = "0.12.0"
+lyon = "1.0.16"
 thiserror = "2.0.17"

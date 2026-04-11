@@ -1,135 +1,36 @@
-use crate::types::{InputData, Stroke};
-use std::time::{Duration, Instant};
+use crate::StrokeError;
+use kurbo::Point;
+use std::f64::consts::{PI, TAU};
 
-/// Configuration for input processing
-#[derive(Debug, Clone)]
-pub struct InputConfig {
-    pub min_sample_rate: Duration,
-    pub max_sample_rate: Duration,
-    pub pressure_range: std::ops::Range<f64>,
-    pub max_velocity: f64,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolType {
+    Unknown,
+    Mouse,
+    Touch,
+    Stylus,
 }
 
-impl Default for InputConfig {
-    fn default() -> Self {
-        Self {
-            min_sample_rate: Duration::from_micros(1000), // 1kHz
-            max_sample_rate: Duration::from_millis(100),  // 10Hz
-            pressure_range: 0.0..1.0,
-            max_velocity: 10000.0, // pixels per second
-        }
-    }
-}
-
-/// Manages input data collection and preprocessing
-pub struct InputManager {
-    config: InputConfig,
-    current_stroke: Stroke,
-    last_input_time: Option<Instant>,
-    stroke_count: usize,
-}
-
-impl InputManager {
-    pub fn new(config: InputConfig) -> Self {
-        Self {
-            config,
-            current_stroke: Stroke::new(),
-            last_input_time: None,
-            stroke_count: 0,
-        }
-    }
-
-    pub fn add_input(&mut self, raw_input: RawInput) -> Result<InputData, InputError> {
-        let now = Instant::now();
-
-        // Validate timing
-        if let Some(last_time) = self.last_input_time {
-            let elapsed = now.duration_since(last_time);
-            if elapsed < self.config.min_sample_rate {
-                return Err(InputError::SampleRateTooHigh(elapsed));
-            }
-        }
-
-        // Validate and normalize input
-        let mut input_data = InputData::new(
-            crate::types::Point::new(raw_input.x, raw_input.y),
-            raw_input.timestamp.unwrap_or_else(|| now.elapsed()),
-        );
-
-        // Normalize pressure
-        if let Some(pressure) = raw_input.pressure {
-            if self.config.pressure_range.contains(&pressure) {
-                input_data = input_data.with_pressure(pressure);
-            } else {
-                return Err(InputError::InvalidPressure(pressure));
-            }
-        }
-
-        // Add tilt if available
-        if let (Some(tilt_x), Some(tilt_y)) = (raw_input.tilt_x, raw_input.tilt_y) {
-            input_data = input_data.with_tilt(crate::types::Point::new(tilt_x, tilt_y));
-        }
-
-        // Add orientation if available
-        if let Some(orientation) = raw_input.orientation {
-            input_data = input_data.with_orientation(orientation);
-        }
-
-        self.current_stroke.add_point(input_data.clone());
-        self.last_input_time = Some(now);
-
-        Ok(input_data)
-    }
-
-    pub fn finish_stroke(&mut self) -> Stroke {
-        self.stroke_count += 1;
-        let completed_stroke = std::mem::replace(&mut self.current_stroke, Stroke::new());
-        self.last_input_time = None;
-        completed_stroke
-    }
-
-    pub fn cancel_stroke(&mut self) {
-        self.current_stroke = Stroke::new();
-        self.last_input_time = None;
-    }
-
-    pub fn current_stroke(&self) -> &Stroke {
-        &self.current_stroke
-    }
-
-    pub fn stroke_count(&self) -> usize {
-        self.stroke_count
-    }
-
-    pub fn reset(&mut self) {
-        self.current_stroke = Stroke::new();
-        self.last_input_time = None;
-        self.stroke_count = 0;
-    }
-}
-
-/// Raw input from device/input system
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RawInput {
-    pub x: f64,
-    pub y: f64,
+    pub tool: ToolType,
+    pub position: Point,
+    pub time: f64,
+    pub stroke_unit_to_physical: Option<f64>,
     pub pressure: Option<f64>,
-    pub tilt_x: Option<f64>,
-    pub tilt_y: Option<f64>,
+    pub tilt: Option<f64>,
     pub orientation: Option<f64>,
-    pub timestamp: Option<Duration>,
 }
 
 impl RawInput {
-    pub fn new(x: f64, y: f64) -> Self {
+    pub fn new(position: Point, time: f64) -> Self {
         Self {
-            x,
-            y,
+            tool: ToolType::Unknown,
+            position,
+            time,
+            stroke_unit_to_physical: None,
             pressure: None,
-            tilt_x: None,
-            tilt_y: None,
+            tilt: None,
             orientation: None,
-            timestamp: None,
         }
     }
 
@@ -138,84 +39,106 @@ impl RawInput {
         self
     }
 
-    pub fn with_tilt(mut self, tilt_x: f64, tilt_y: f64) -> Self {
-        self.tilt_x = Some(tilt_x);
-        self.tilt_y = Some(tilt_y);
-        self
-    }
-
-    pub fn with_orientation(mut self, orientation: f64) -> Self {
-        self.orientation = Some(orientation);
-        self
-    }
-
-    pub fn with_timestamp(mut self, timestamp: Duration) -> Self {
-        self.timestamp = Some(timestamp);
+    pub fn with_tool(mut self, tool: ToolType) -> Self {
+        self.tool = tool;
         self
     }
 }
 
-/// Errors that can occur during input processing
-#[derive(Debug, thiserror::Error)]
-pub enum InputError {
-    #[error("Sample rate too high: {0:?}")]
-    SampleRateTooHigh(Duration),
-    #[error("Invalid pressure value: {0}")]
-    InvalidPressure(f64),
-    #[error("Invalid position: x={0}, y={1}")]
-    InvalidPosition(f64, f64),
-    #[error("Stroke is empty")]
-    EmptyStroke,
+#[derive(Debug, Clone, Default)]
+pub struct InputBatch {
+    pub inputs: Vec<RawInput>,
+    pub noise_seed: u32,
 }
 
-/// Input event types
-#[derive(Debug, Clone)]
-pub enum InputEvent {
-    StrokeStart,
-    StrokeMove(InputData),
-    StrokeEnd(Stroke),
-    Cancel,
+impl InputBatch {
+    pub fn new(inputs: Vec<RawInput>) -> Result<Self, StrokeError> {
+        let batch = Self {
+            inputs,
+            noise_seed: 0,
+        };
+        batch.validate()?;
+        Ok(batch)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.inputs.is_empty()
+    }
+
+    pub fn validate(&self) -> Result<(), StrokeError> {
+        validate_input_sequence(&self.inputs)
+    }
 }
 
-/// Event dispatcher for input events
-pub struct InputDispatcher {
-    listeners: Vec<Box<dyn InputEventListener>>,
-}
+pub(crate) fn validate_input_sequence(inputs: &[RawInput]) -> Result<(), StrokeError> {
+    let Some(first) = inputs.first() else {
+        return Ok(());
+    };
+    validate_input(first)?;
+    let tool = first.tool;
+    let has_pressure = first.pressure.is_some();
+    let has_tilt = first.tilt.is_some();
+    let has_orientation = first.orientation.is_some();
+    let has_physical = first.stroke_unit_to_physical.is_some();
 
-impl InputDispatcher {
-    pub fn new() -> Self {
-        Self {
-            listeners: Vec::new(),
+    for pair in inputs.windows(2) {
+        let prev = pair[0];
+        let next = pair[1];
+        validate_input(&next)?;
+        if next.tool != tool
+            || next.pressure.is_some() != has_pressure
+            || next.tilt.is_some() != has_tilt
+            || next.orientation.is_some() != has_orientation
+            || next.stroke_unit_to_physical.is_some() != has_physical
+        {
+            return Err(StrokeError::InvalidInput(
+                "tool and optional fields must be consistent inside a stroke",
+            ));
+        }
+        if next.time < prev.time {
+            return Err(StrokeError::InvalidInput(
+                "input time must be nondecreasing",
+            ));
+        }
+        if next.time == prev.time && next.position == prev.position {
+            return Err(StrokeError::InvalidInput(
+                "repeated position/time triplets are not allowed",
+            ));
         }
     }
-
-    pub fn add_listener(&mut self, listener: Box<dyn InputEventListener>) {
-        self.listeners.push(listener);
-    }
-
-    pub fn dispatch(&mut self, event: InputEvent) {
-        for listener in &mut self.listeners {
-            listener.handle_event(&event);
-        }
-    }
+    Ok(())
 }
 
-impl Default for InputDispatcher {
-    fn default() -> Self {
-        Self::new()
+fn validate_input(input: &RawInput) -> Result<(), StrokeError> {
+    if !input.position.x.is_finite() || !input.position.y.is_finite() || !input.time.is_finite() {
+        return Err(StrokeError::InvalidInput(
+            "position and time must be finite",
+        ));
     }
-}
-
-/// Trait for handling input events
-pub trait InputEventListener {
-    fn handle_event(&mut self, event: &InputEvent);
-}
-
-/// Simple logging listener for debugging
-pub struct LoggingListener;
-
-impl InputEventListener for LoggingListener {
-    fn handle_event(&mut self, event: &InputEvent) {
-        println!("Input event: {:?}", event);
+    if input.time < 0.0 {
+        return Err(StrokeError::InvalidInput("input time must be non-negative"));
     }
+    if let Some(value) = input.stroke_unit_to_physical
+        && (!value.is_finite() || value <= 0.0)
+    {
+        return Err(StrokeError::InvalidInput(
+            "physical scale must be finite and positive",
+        ));
+    }
+    if let Some(value) = input.pressure
+        && (!value.is_finite() || !(0.0..=1.0).contains(&value))
+    {
+        return Err(StrokeError::InvalidInput("pressure must be in [0, 1]"));
+    }
+    if let Some(value) = input.tilt
+        && (!value.is_finite() || !(0.0..=PI * 0.5).contains(&value))
+    {
+        return Err(StrokeError::InvalidInput("tilt must be in [0, pi / 2]"));
+    }
+    if let Some(value) = input.orientation
+        && (!value.is_finite() || !(0.0..TAU).contains(&value))
+    {
+        return Err(StrokeError::InvalidInput("orientation must be in [0, 2pi)"));
+    }
+    Ok(())
 }
