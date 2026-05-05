@@ -56,7 +56,8 @@ impl PlaygroundApp {
                 .create_window(attributes)
                 .context("failed to create playground window")?,
         );
-        let renderer = pollster::block_on(GpuRenderer::new(window.clone()))?;
+        let renderer = pollster::block_on(GpuRenderer::new(window.clone()))
+            .context("failed to initialize playground renderer")?;
         self.window_id = Some(window.id());
         self.renderer = Some(renderer);
         self.window = Some(window);
@@ -84,30 +85,43 @@ impl PlaygroundApp {
                 self.request_redraw();
             }
             WindowEvent::RedrawRequested => {
-                let live_updated = self.scene.update_live_stroke()?;
+                let live_updated = self
+                    .scene
+                    .update_live_stroke()
+                    .context("failed to update the live stroke during redraw")?;
                 if live_updated {
                     debug!("coalesced queued cursor samples into a live stroke update");
                 }
                 self.scene.log_large_scene_if_needed();
                 if let Some(renderer) = &mut self.renderer {
-                    match renderer.render(&self.scene) {
-                        Ok(RenderStatus::Rendered | RenderStatus::Skipped) => {}
-                        Ok(RenderStatus::NeedsReconfigure) => {
+                    match renderer
+                        .render(&self.scene)
+                        .context("failed to render the current playground scene")?
+                    {
+                        RenderStatus::Rendered | RenderStatus::Skipped => {}
+                        RenderStatus::NeedsReconfigure => {
                             debug!("renderer requested surface reconfiguration");
                             renderer.reconfigure();
                             self.request_redraw();
                         }
-                        Err(error) => return Err(error),
                     }
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
-                if self.input.cursor_moved(position, &mut self.scene)? {
+                if self
+                    .input
+                    .cursor_moved(position, &mut self.scene)
+                    .context("failed to process cursor movement")?
+                {
                     self.request_redraw();
                 }
             }
             WindowEvent::MouseInput { state, button, .. } => {
-                if self.input.mouse_input(button, state, &mut self.scene)? {
+                if self
+                    .input
+                    .mouse_input(button, state, &mut self.scene)
+                    .context("failed to process mouse button input")?
+                {
                     self.request_redraw();
                 }
             }

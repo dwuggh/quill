@@ -1,144 +1,59 @@
-use crate::StrokeError;
-use kurbo::Point;
-use std::f64::consts::{PI, TAU};
+use std::time;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ToolType {
-    Unknown,
-    Mouse,
-    Touch,
+use smallvec::SmallVec;
+
+
+#[repr(C)]
+#[derive(Debug, PartialEq, PartialOrd, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct Vec2 {
+    x: f32,
+    y: f32,
+}
+
+pub enum PenType {
     Stylus,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct RawInput {
-    pub tool: ToolType,
-    pub position: Point,
-    pub time: f64,
-    pub stroke_unit_to_physical: Option<f64>,
-    pub pressure: Option<f64>,
-    pub tilt: Option<f64>,
-    pub orientation: Option<f64>,
+#[derive(Debug, Clone, Copy)]
+pub struct Input {
+    position: Vec2,
+    timestamp: time::Instant,
+    /// normally scale in 1/8192 or 1/16384
+    pressure: f32,
+    tilt: Vec2,
 }
 
-impl RawInput {
-    pub fn new(position: Point, time: f64) -> Self {
-        Self {
-            tool: ToolType::Unknown,
-            position,
-            time,
-            stroke_unit_to_physical: None,
-            pressure: None,
-            tilt: None,
-            orientation: None,
-        }
-    }
-
-    pub fn with_pressure(mut self, pressure: f64) -> Self {
-        self.pressure = Some(pressure);
-        self
-    }
-
-    pub fn with_tool(mut self, tool: ToolType) -> Self {
-        self.tool = tool;
-        self
-    }
+#[repr(C)]
+#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct PathPoint {
+    position: Vec2,
+    pressure: f32,
+    altitude: f32,
+    azimuth: f32,
+    _pad: f32,
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct InputBatch {
-    pub inputs: Vec<RawInput>,
-    pub noise_seed: u32,
+#[derive(Debug, thiserror::Error)]
+pub enum InputModelError {
 }
 
-impl InputBatch {
-    pub fn new(inputs: Vec<RawInput>) -> Result<Self, StrokeError> {
-        let batch = Self {
-            inputs,
-            noise_seed: 0,
-        };
-        batch.validate()?;
-        Ok(batch)
-    }
+#[derive(Clone, Copy, Debug)]
+pub struct ModelUpdate {
+    /// Old modeled path indices that should be considered invalid.
+    ///
+    /// Downstream geometry caches should delete/rebuild from this index.
+    pub invalidated_from: usize,
 
-    pub fn is_empty(&self) -> bool {
-        self.inputs.is_empty()
-    }
-
-    pub fn validate(&self) -> Result<(), StrokeError> {
-        validate_input_sequence(&self.inputs)
-    }
+    /// Prefix [0, stable_len) will not change anymore.
+    pub stable_len: usize,
 }
 
-pub(crate) fn validate_input_sequence(inputs: &[RawInput]) -> Result<(), StrokeError> {
-    let Some(first) = inputs.first() else {
-        return Ok(());
-    };
-    validate_input(first)?;
-    let tool = first.tool;
-    let has_pressure = first.pressure.is_some();
-    let has_tilt = first.tilt.is_some();
-    let has_orientation = first.orientation.is_some();
-    let has_physical = first.stroke_unit_to_physical.is_some();
-
-    for pair in inputs.windows(2) {
-        let prev = pair[0];
-        let next = pair[1];
-        validate_input(&next)?;
-        if next.tool != tool
-            || next.pressure.is_some() != has_pressure
-            || next.tilt.is_some() != has_tilt
-            || next.orientation.is_some() != has_orientation
-            || next.stroke_unit_to_physical.is_some() != has_physical
-        {
-            return Err(StrokeError::InvalidInput(
-                "tool and optional fields must be consistent inside a stroke",
-            ));
-        }
-        if next.time < prev.time {
-            return Err(StrokeError::InvalidInput(
-                "input time must be nondecreasing",
-            ));
-        }
-        if next.time == prev.time && next.position == prev.position {
-            return Err(StrokeError::InvalidInput(
-                "repeated position/time triplets are not allowed",
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn validate_input(input: &RawInput) -> Result<(), StrokeError> {
-    if !input.position.x.is_finite() || !input.position.y.is_finite() || !input.time.is_finite() {
-        return Err(StrokeError::InvalidInput(
-            "position and time must be finite",
-        ));
-    }
-    if input.time < 0.0 {
-        return Err(StrokeError::InvalidInput("input time must be non-negative"));
-    }
-    if let Some(value) = input.stroke_unit_to_physical
-        && (!value.is_finite() || value <= 0.0)
-    {
-        return Err(StrokeError::InvalidInput(
-            "physical scale must be finite and positive",
-        ));
-    }
-    if let Some(value) = input.pressure
-        && (!value.is_finite() || !(0.0..=1.0).contains(&value))
-    {
-        return Err(StrokeError::InvalidInput("pressure must be in [0, 1]"));
-    }
-    if let Some(value) = input.tilt
-        && (!value.is_finite() || !(0.0..=PI * 0.5).contains(&value))
-    {
-        return Err(StrokeError::InvalidInput("tilt must be in [0, pi / 2]"));
-    }
-    if let Some(value) = input.orientation
-        && (!value.is_finite() || !(0.0..TAU).contains(&value))
-    {
-        return Err(StrokeError::InvalidInput("orientation must be in [0, 2pi)"));
-    }
-    Ok(())
+/// process input datas to points on a path. This combines smoothing,
+/// spline production and interpolation
+pub trait InputModeler {
+    /// add input data. should erase any previously predicted point.
+    fn reset(&mut self);
+    fn enqueue(&mut self, points: &[Input], predicted: &[Input]) -> Result<ModelUpdate, InputModelError>;
+    fn path(&self) -> &[PathPoint];
+    fn stable_len(&self) -> usize;
 }

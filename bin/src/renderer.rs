@@ -1,7 +1,7 @@
 use crate::scene::Scene;
 use anyhow::{Context, Result, anyhow};
 use bytemuck::{Pod, Zeroable};
-use quill::{ColorRgba, MutableStrokeMesh, Point, StrokeVertex};
+use quill::{ColorRgba, MeshPartition, MutableStrokeMesh, Point, StrokeVertex};
 use std::mem;
 use std::sync::Arc;
 use tracing::{debug, trace, warn};
@@ -46,20 +46,42 @@ struct MeshBuffers {
     indices: Vec<u32>,
 }
 
-impl MeshBuffers {
-    fn push_mesh(&mut self, mesh: &MutableStrokeMesh, width: f32, height: f32) {
-        self.push_slices(&mesh.vertices, &mesh.indices, width, height);
+trait MeshGeometry {
+    fn vertices(&self) -> &[StrokeVertex];
+    fn indices(&self) -> &[u32];
+}
+
+impl MeshGeometry for MutableStrokeMesh {
+    fn vertices(&self) -> &[StrokeVertex] {
+        &self.vertices
     }
 
-    fn push_slices(&mut self, vertices: &[StrokeVertex], indices: &[u32], width: f32, height: f32) {
+    fn indices(&self) -> &[u32] {
+        &self.indices
+    }
+}
+
+impl MeshGeometry for MeshPartition {
+    fn vertices(&self) -> &[StrokeVertex] {
+        &self.vertices
+    }
+
+    fn indices(&self) -> &[u32] {
+        &self.indices
+    }
+}
+
+impl MeshBuffers {
+    fn push_geometry<G: MeshGeometry>(&mut self, geometry: &G, width: f32, height: f32) {
         let base_index = self.vertices.len() as u32;
         self.vertices.extend(
-            vertices
+            geometry
+                .vertices()
                 .iter()
                 .map(|vertex| gpu_vertex(vertex, width, height)),
         );
         self.indices
-            .extend(indices.iter().map(|index| base_index + *index));
+            .extend(geometry.indices().iter().map(|index| base_index + *index));
     }
 }
 
@@ -341,13 +363,13 @@ impl GpuRenderer {
         for finished in scene.completed_strokes() {
             for group in &finished.mesh.render_groups {
                 for partition in group {
-                    buffers.push_slices(&partition.vertices, &partition.indices, width, height);
+                    buffers.push_geometry(partition, width, height);
                 }
             }
         }
 
         for live_mesh in scene.active_meshes() {
-            buffers.push_mesh(live_mesh, width, height);
+            buffers.push_geometry(live_mesh, width, height);
         }
 
         buffers
