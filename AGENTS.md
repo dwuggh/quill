@@ -17,6 +17,8 @@
 - Rust 2024 edition; use default `rustfmt` (no overrides).
 - Naming: `CamelCase` types/traits; `snake_case` functions, variables, modules.
 - Docs: prefer module docs (`//!`); add brief `///` to public items; re-export ergonomic API in `lib.rs`.
+- Prefer struct methods and associated functions over loose helper functions when behavior belongs to a type.
+- Keep GPU shader source in separate `.wgsl` files under `src/shader/` and load it from Rust with `include_str!`; avoid large inline shader string constants.
 - Keep diffs minimal; maintain clear separation between library and app crates.
 
 ## Testing Guidelines
@@ -32,4 +34,3 @@
 ## Security & Configuration Tips (Optional)
 - Handle GPU/Surface errors (Outdated/Lost) gracefully in app code; reconfigure or skip a frame rather than panic.
 - Helpful env vars: `RUST_BACKTRACE=1`, `WINIT_UNIX_BACKEND=x11`, `WGPU_BACKEND=vulkan|gl|metal|dx12`.
-

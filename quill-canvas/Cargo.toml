@@ -1,0 +1,16 @@
+[package]
+name = "quill-canvas"
+version.workspace = true
+edition.workspace = true
+
+[features]
+bevy = []
+default = ["bevy"]
+
+[dependencies]
+# bevy_app = { version = "0.18.1", optional = true }
+bevy = "0.18.1"
+bevy_ecs = "0.18.1"
+thiserror.workspace = true
+tracing.workspace = true
+quill_stroke = { path = "../quill-stroke" }

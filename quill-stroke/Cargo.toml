@@ -1,0 +1,11 @@
+[package]
+name = "quill_stroke"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+bytemuck.workspace = true
+nalgebra.workspace = true
+ordered-float.workspace = true
+smallvec.workspace = true
+thiserror.workspace = true
