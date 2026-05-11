@@ -4414,6 +4414,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "quill-app"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "quill-canvas",
+ "quill_stroke",
+]
+
+[[package]]
 name = "quill-canvas"
 version = "0.1.0"
 dependencies = [

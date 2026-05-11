@@ -7,7 +7,7 @@ use bevy::app::{App, Plugin, PostUpdate, Update};
 use bevy_ecs::message::{MessageRegistry, message_update_system};
 use bevy_ecs::schedule::IntoScheduleConfigs;
 
-use crate::render::RenderPlugin;
+use crate::render::QuillRenderPlugin;
 use crate::{
     canvas::{self, CanvasErrors, LastAddedPage},
     input::{CanvasCommand, CanvasInput, CanvasMode, PointerState},
@@ -43,10 +43,8 @@ impl Plugin for QuillPlugin {
                 message_update_system,
             )
                 .chain(),
-        )
-        .add_systems(PostUpdate, render::sync_stroke_gpu);
-        app.add_plugins(RenderPlugin);
-
+        );
+        app.add_plugins(QuillRenderPlugin);
     }
 }
 

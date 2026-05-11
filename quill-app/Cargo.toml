@@ -1,0 +1,13 @@
+[package]
+name = "quill-app"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "quill"
+path = "src/main.rs"
+
+[dependencies]
+bevy = "0.18.1"
+quill-canvas = { path = "../quill-canvas", features = ["bevy"] }
+quill_stroke = { path = "../quill-stroke" }

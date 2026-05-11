@@ -7,9 +7,10 @@ struct PathPoint {
 };
 
 struct StrokeParams {
+    radius: f32,
+    pressure_mode: u32,
     sample_count: u32,
     dirty_segment_start: u32,
-    transform: mat3x3<f32>,
 };
 
 struct PointStyle {
@@ -24,11 +25,16 @@ struct VertexOutput {
     @location(2) color: vec4<f32>,
 };
 
-struct CameraUniform {
+struct View {
     clip_from_world: mat4x4<f32>,
 };
 
-@group(0) @binding(0) var<uniform> camera: CameraUniform;
+struct LocalUniform {
+    world_from_local: mat4x4<f32>,
+};
+
+@group(0) @binding(0) var<uniform> view: View;
+@group(0) @binding(1) var<uniform> local_transform: LocalUniform;
 
 @group(1) @binding(0) var<storage, read> path: array<PathPoint>;
 @group(1) @binding(1) var<uniform> stroke: StrokeParams;
@@ -51,10 +57,9 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32, @builtin(instance_index) in
 
     let local = corners[vertex_index];
     let stroke_position = point.position + local;
-    let world_position = stroke.transform * vec3<f32>(stroke_position, 1.0);
 
     var output: VertexOutput;
-    output.clip_position = camera.clip_from_world * vec4<f32>(world_position.xy, 0.0, 1.0);
+    output.clip_position = view.clip_from_world * local_transform.world_from_local * vec4<f32>(stroke_position.xy, 0.0, 1.0);
     output.local = local;
     output.radius = radius;
     output.color = style.color;

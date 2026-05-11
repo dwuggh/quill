@@ -3,7 +3,7 @@
 //! The input modeler is global while a stroke is active. Each completed or
 //! active stroke entity stores the brush snapshot and the latest modeled path.
 
-use bevy::math::Mat3;
+use bevy::{math::Mat3, transform::components::Transform};
 use bevy_ecs::prelude::*;
 use quill_stroke::{
     brush::Brush,
@@ -144,7 +144,7 @@ pub(crate) fn process_canvas_input(
                     match modeler.modeler.enqueue(&[input], &[]) {
                         Ok(update) => {
                             let data = StrokeData::new(StrokeBrush { brush }, update);
-                            let entity = commands.spawn(data).id();
+                            let entity = commands.spawn((data, Transform::IDENTITY)).id();
                             active.entity = Some(entity);
                         }
                         Err(error) => errors.0.push(CanvasError::from(error)),

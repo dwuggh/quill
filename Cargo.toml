@@ -2,6 +2,7 @@
 members = [
   "quill-stroke",
   "quill-canvas",
+  "quill-app",
   "quill-playground",
 ]
 resolver = "3"

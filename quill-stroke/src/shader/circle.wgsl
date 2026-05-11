@@ -7,15 +7,10 @@ struct PathPoint {
 };
 
 struct StrokeParams {
-    sample_count: u32,
-    dirty_segment_start: u32,
-    transform: mat3x3<f32>,
-};
-
-struct CircleBrush {
     radius: f32,
     pressure_mode: u32,
-    _pad0: vec2<u32>,
+    sample_count: u32,
+    dirty_segment_start: u32,
 };
 
 struct VertexOutput {
@@ -25,21 +20,26 @@ struct VertexOutput {
     @location(2) radius: f32,
 };
 
-struct CameraUniform {
+struct View {
     clip_from_world: mat4x4<f32>,
 };
 
-@group(0) @binding(0) var<uniform> camera: CameraUniform;
+struct LocalUniform {
+    world_from_local: mat4x4<f32>,
+};
+
+
+@group(0) @binding(0) var<uniform> view: View;
+@group(0) @binding(1) var<uniform> local_transform: LocalUniform;
 
 @group(1) @binding(0) var<storage, read> path: array<PathPoint>;
 @group(1) @binding(1) var<uniform> stroke: StrokeParams;
-@group(1) @binding(2) var<uniform> brush: CircleBrush;
 
 fn segment_radius(a: PathPoint, b: PathPoint) -> f32 {
-    if brush.pressure_mode == 1u {
-        return max(brush.radius * max((a.pressure + b.pressure) * 0.5, 0.0), 0.0);
+    if stroke.pressure_mode == 1u {
+        return max(stroke.radius * max((a.pressure + b.pressure) * 0.5, 0.0), 0.0);
     }
-    return max(brush.radius, 0.0);
+    return max(stroke.radius, 0.0);
 }
 
 @vertex
@@ -67,10 +67,9 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32, @builtin(instance_index) in
 
     let local = corners[vertex_index];
     let stroke_position = a.position + tangent * local.x + normal * local.y;
-    let world_position = stroke.transform * vec3<f32>(stroke_position, 1.0);
 
     var output: VertexOutput;
-    output.clip_position = camera.clip_from_world * vec4<f32>(world_position.xy, 0.0, 1.0);
+    output.clip_position = view.clip_from_world * local_transform.world_from_local * vec4<f32>(stroke_position.xy, 0.0, 1.0);
     output.local = local;
     output.segment_length = segment_length;
     output.radius = radius;
