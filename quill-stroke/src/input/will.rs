@@ -1,6 +1,6 @@
 use smallvec::SmallVec;
 
-use super::{Input, InputModelError, InputModeler, InputSource, ModelUpdate, PathPoint, Vec2};
+use super::{Input, InputModelError, InputModeler, InputSource, ModelUpdate, PathPoint};
 
 const EPSILON: f32 = 1.0e-5;
 const SPLINE_LOOKBACK: usize = 2;
@@ -236,7 +236,7 @@ impl WillInputModeler {
         self.inputs.validate_enqueue(points, predicted)
     }
 
-    fn rebuild_unstable_path(&mut self) {
+    fn rebuild_unstable_path(&mut self, stable_seed: Option<PathPoint>) {
         let first_unstable_input = self.inputs.first_unstable_input;
         let smoothed = self.smoother.smooth(
             &self.inputs.cached_inputs[first_unstable_input..],
@@ -247,7 +247,8 @@ impl WillInputModeler {
             .inputs
             .new_first_unstable_input(self.config.stable_lookahead);
 
-        let emitted = PathBuilder::new(self.config).interpolate(&smoothed.with_anchor());
+        let emitted =
+            PathBuilder::new(self.config).interpolate(&smoothed.with_anchor(), stable_seed);
         let stable_extension = emitted
             .iter()
             .take_while(|sample| sample.input_index < new_first_unstable_input)
@@ -297,8 +298,9 @@ impl InputModeler for WillInputModeler {
 
         let invalidated_from = self.stable_len;
         self.path.truncate(self.stable_len);
+        let stable_seed = self.path.last().copied();
         self.inputs.replace_prediction(points, predicted);
-        self.rebuild_unstable_path();
+        self.rebuild_unstable_path(stable_seed);
 
         Ok(ModelUpdate {
             metadata: super::ModelUpdateMeta {
@@ -349,10 +351,12 @@ impl<'a> InputBatch<'a> {
 
 impl Input {
     fn validate(&self, input_source: InputSource, index: usize) -> Result<(), InputModelError> {
-        self.position.validate(input_source, index, "position")?;
+        self.validate_finite(input_source, index, "position.x", self.x as f64)?;
+        self.validate_finite(input_source, index, "position.y", self.y as f64)?;
         self.validate_finite(input_source, index, "timestamp", self.timestamp)?;
         self.validate_finite(input_source, index, "pressure", self.pressure as f64)?;
-        self.tilt.validate(input_source, index, "tilt")?;
+        self.validate_finite(input_source, index, "tilt.x", self.tilt_x as f64)?;
+        self.validate_finite(input_source, index, "tilt.y", self.tilt_y as f64)?;
         Ok(())
     }
 
@@ -377,53 +381,48 @@ impl Input {
 
     fn to_path_point(self) -> PathPoint {
         PathPoint {
-            position: self.position,
+            x: self.x,
+            y: self.y,
             pressure: self.pressure.clamp(0.0, 1.0),
-            altitude: self.tilt.x,
-            azimuth: self.tilt.y,
-            _pad: 0.0,
+            altitude: self.tilt_x,
+            azimuth: self.tilt_y,
+            t: 0.0,
         }
     }
 }
 
-impl Vec2 {
-    fn validate(
-        self,
-        input_source: InputSource,
-        index: usize,
-        field_prefix: &'static str,
-    ) -> Result<(), InputModelError> {
-        self.validate_component(input_source, index, field_prefix, "x", self.x)?;
-        self.validate_component(input_source, index, field_prefix, "y", self.y)?;
-        Ok(())
+impl PathPoint {
+    fn zero_delta() -> Self {
+        Self {
+            x: 0.0,
+            y: 0.0,
+            pressure: 0.0,
+            altitude: 0.0,
+            azimuth: 0.0,
+            t: 0.0,
+        }
     }
 
-    fn validate_component(
-        self,
-        input_source: InputSource,
-        index: usize,
-        field_prefix: &'static str,
-        component: &'static str,
-        value: f32,
-    ) -> Result<(), InputModelError> {
-        if value.is_finite() {
-            return Ok(());
+    fn offset_by(self, delta: Self) -> Self {
+        Self {
+            x: self.x + delta.x,
+            y: self.y + delta.y,
+            pressure: self.pressure + delta.pressure,
+            altitude: self.altitude,
+            azimuth: self.azimuth,
+            t: self.t,
         }
+    }
 
-        let field = match (field_prefix, component) {
-            ("position", "x") => "position.x",
-            ("position", "y") => "position.y",
-            ("tilt", "x") => "tilt.x",
-            ("tilt", "y") => "tilt.y",
-            _ => field_prefix,
-        };
-
-        Err(InputModelError::NonFiniteInput {
-            input_source,
-            index,
-            field,
-            value: value as f64,
-        })
+    fn delta_to(self, other: Self) -> Self {
+        Self {
+            x: other.x - self.x,
+            y: other.y - self.y,
+            pressure: other.pressure - self.pressure,
+            altitude: 0.0,
+            azimuth: 0.0,
+            t: 0.0,
+        }
     }
 
     fn distance_to(self, other: Self) -> f32 {
@@ -431,87 +430,39 @@ impl Vec2 {
         let dy = self.y - other.y;
         dx.hypot(dy)
     }
-}
-
-impl PathPoint {
-    fn zero_delta() -> Self {
-        Self {
-            position: Vec2 { x: 0.0, y: 0.0 },
-            pressure: 0.0,
-            altitude: 0.0,
-            azimuth: 0.0,
-            _pad: 0.0,
-        }
-    }
-
-    fn offset_by(self, delta: Self) -> Self {
-        Self {
-            position: Vec2 {
-                x: self.position.x + delta.position.x,
-                y: self.position.y + delta.position.y,
-            },
-            pressure: self.pressure + delta.pressure,
-            altitude: self.altitude,
-            azimuth: self.azimuth,
-            _pad: 0.0,
-        }
-    }
-
-    fn delta_to(self, other: Self) -> Self {
-        Self {
-            position: Vec2 {
-                x: other.position.x - self.position.x,
-                y: other.position.y - self.position.y,
-            },
-            pressure: other.pressure - self.pressure,
-            altitude: 0.0,
-            azimuth: 0.0,
-            _pad: 0.0,
-        }
-    }
-
-    fn distance_to(self, other: Self) -> f32 {
-        self.position.distance_to(other.position)
-    }
 
     fn smoothed_toward(self, input: Self, trend: Self, alpha: f32) -> Self {
         let predicted = self.offset_by(trend);
         Self {
-            position: Vec2 {
-                x: alpha.mul_add(input.position.x, (1.0 - alpha) * predicted.position.x),
-                y: alpha.mul_add(input.position.y, (1.0 - alpha) * predicted.position.y),
-            },
+            x: alpha.mul_add(input.x, (1.0 - alpha) * predicted.x),
+            y: alpha.mul_add(input.y, (1.0 - alpha) * predicted.y),
             pressure: alpha.mul_add(input.pressure, (1.0 - alpha) * predicted.pressure),
             altitude: input.altitude,
             azimuth: input.azimuth,
-            _pad: 0.0,
+            t: input.t,
         }
     }
 
     fn smoothed_trend_from(self, previous: Self, previous_trend: Self, beta: f32) -> Self {
         let delta = previous.delta_to(self);
         Self {
-            position: Vec2 {
-                x: beta.mul_add(delta.position.x, (1.0 - beta) * previous_trend.position.x),
-                y: beta.mul_add(delta.position.y, (1.0 - beta) * previous_trend.position.y),
-            },
+            x: beta.mul_add(delta.x, (1.0 - beta) * previous_trend.x),
+            y: beta.mul_add(delta.y, (1.0 - beta) * previous_trend.y),
             pressure: beta.mul_add(delta.pressure, (1.0 - beta) * previous_trend.pressure),
             altitude: 0.0,
             azimuth: 0.0,
-            _pad: 0.0,
+            t: 0.0,
         }
     }
 
     fn lerp(self, other: Self, t: f32) -> Self {
         Self {
-            position: Vec2 {
-                x: Self::lerp_value(self.position.x, other.position.x, t),
-                y: Self::lerp_value(self.position.y, other.position.y, t),
-            },
+            x: Self::lerp_value(self.x, other.x, t),
+            y: Self::lerp_value(self.y, other.y, t),
             pressure: Self::lerp_value(self.pressure, other.pressure, t).clamp(0.0, 1.0),
             altitude: Self::lerp_sensor(self.altitude, other.altitude, t),
             azimuth: Self::lerp_sensor(self.azimuth, other.azimuth, t),
-            _pad: 0.0,
+            t: Self::lerp_value(self.t, other.t, t),
         }
     }
 
@@ -528,11 +479,12 @@ impl PathPoint {
     }
 
     fn is_finite(self) -> bool {
-        self.position.x.is_finite()
-            && self.position.y.is_finite()
+        self.x.is_finite()
+            && self.y.is_finite()
             && self.pressure.is_finite()
             && self.altitude.is_finite()
             && self.azimuth.is_finite()
+            && self.t.is_finite()
     }
 }
 
@@ -546,12 +498,34 @@ impl PathBuilder {
         Self { config }
     }
 
-    fn interpolate(self, points: &[SmoothedPoint]) -> Vec<ModeledSample> {
+    fn interpolate(self, points: &[SmoothedPoint], seed: Option<PathPoint>) -> Vec<ModeledSample> {
+        let points = self.parameterize(points, seed);
         match points.len() {
             0 => Vec::new(),
             1 | 2 => points.iter().copied().map(ModeledSample::from).collect(),
-            _ => self.interpolate_spline(points),
+            _ => self.interpolate_spline(&points),
         }
+    }
+
+    fn parameterize(self, points: &[SmoothedPoint], seed: Option<PathPoint>) -> Vec<SmoothedPoint> {
+        let mut parameterized = Vec::with_capacity(points.len());
+        let mut previous = seed;
+        let mut t = seed.map_or(0.0, |point| point.t);
+
+        for point in points.iter().copied() {
+            let mut next = point.point;
+            if let Some(previous) = previous {
+                t += previous.distance_to(next).sqrt();
+            }
+            next.t = t;
+            parameterized.push(SmoothedPoint {
+                point: next,
+                input_index: point.input_index,
+            });
+            previous = Some(next);
+        }
+
+        parameterized
     }
 
     fn interpolate_spline(self, points: &[SmoothedPoint]) -> Vec<ModeledSample> {
@@ -594,13 +568,15 @@ impl PathBuilder {
         p3: PathPoint,
         t: f32,
     ) -> PathPoint {
-        let t0 = 0.0;
-        let t1 = self.knot(t0, p0, p1);
-        let t2 = self.knot(t1, p1, p2);
-        let t3 = self.knot(t2, p2, p3);
+        let t0 = p0.t;
+        let t1 = p1.t;
+        let t2 = p2.t;
+        let t3 = p3.t;
 
         if (t2 - t1).abs() <= EPSILON {
-            return p1.lerp(p2, t);
+            let mut point = p1.lerp(p2, t);
+            point.t = t1 + (t2 - t1) * t;
+            return point;
         }
 
         let u = t1 + (t2 - t1) * t;
@@ -609,11 +585,9 @@ impl PathBuilder {
         let a3 = self.interpolate_between_knots(p2, p3, t2, t3, u);
         let b1 = self.interpolate_between_knots(a1, a2, t0, t2, u);
         let b2 = self.interpolate_between_knots(a2, a3, t1, t3, u);
-        self.interpolate_between_knots(b1, b2, t1, t2, u)
-    }
-
-    fn knot(self, previous: f32, a: PathPoint, b: PathPoint) -> f32 {
-        previous + a.distance_to(b).sqrt()
+        let mut point = self.interpolate_between_knots(b1, b2, t1, t2, u);
+        point.t = u;
+        point
     }
 
     fn interpolate_between_knots(
@@ -662,16 +636,14 @@ impl From<SmoothedPoint> for ModeledSample {
 mod tests {
     use super::*;
 
-    fn vec2(x: f32, y: f32) -> Vec2 {
-        Vec2 { x, y }
-    }
-
     fn input(x: f32, y: f32, timestamp: f64) -> Input {
         Input {
-            position: vec2(x, y),
+            x,
+            y,
             timestamp,
             pressure: 1.0,
-            tilt: vec2(0.0, 0.0),
+            tilt_x: 0.0,
+            tilt_y: 0.0,
         }
     }
 
@@ -682,13 +654,25 @@ mod tests {
         })
     }
 
+    fn assert_monotonic_path_t(path: &[PathPoint]) {
+        for window in path.windows(2) {
+            assert!(window[0].t.is_finite());
+            assert!(window[1].t.is_finite());
+            assert!(window[0].t <= window[1].t + EPSILON);
+        }
+    }
+
     #[test]
     fn single_input_produces_one_finite_path_point() {
         let mut modeler = modeler_without_lag();
-        let update = modeler.enqueue(&[input(1.0, 2.0, 0.0)], &[]).unwrap();
+        let stable_len = modeler
+            .enqueue(&[input(1.0, 2.0, 0.0)], &[])
+            .unwrap()
+            .metadata
+            .stable_len;
 
         assert_eq!(modeler.path.len(), 1);
-        assert_eq!(update.metadata.stable_len, 1);
+        assert_eq!(stable_len, 1);
         assert!(modeler.path[0].is_finite());
     }
 
@@ -696,10 +680,12 @@ mod tests {
     fn pressure_is_clamped_and_tilt_maps_to_orientation_fields() {
         let mut modeler = modeler_without_lag();
         let sample = Input {
-            position: vec2(0.0, 0.0),
+            x: 0.0,
+            y: 0.0,
             timestamp: 0.0,
             pressure: 2.0,
-            tilt: vec2(0.7, 1.2),
+            tilt_x: 0.7,
+            tilt_y: 1.2,
         };
 
         modeler.enqueue(&[sample], &[]).unwrap();
@@ -733,9 +719,36 @@ mod tests {
 
         assert!(modeler.path.len() > 4);
         for window in modeler.path.windows(2) {
-            assert!(window[0].position.x <= window[1].position.x + EPSILON);
-            assert!(window[1].position.y.abs() <= EPSILON);
+            assert!(window[0].x <= window[1].x + EPSILON);
+            assert!(window[1].y.abs() <= EPSILON);
         }
+        assert_monotonic_path_t(&modeler.path);
+    }
+
+    #[test]
+    fn straight_line_inputs_generate_centripetal_path_t() {
+        let mut modeler = WillInputModeler::with_config(WillInputModelerConfig {
+            smoothing_alpha: 1.0,
+            smoothing_beta: 1.0,
+            interpolation_spacing: 1.0,
+            stable_lookahead: 0,
+        });
+
+        modeler
+            .enqueue(
+                &[
+                    input(0.0, 0.0, 0.0),
+                    input(4.0, 0.0, 0.1),
+                    input(8.0, 0.0, 0.2),
+                    input(12.0, 0.0, 0.3),
+                ],
+                &[],
+            )
+            .unwrap();
+
+        assert_monotonic_path_t(&modeler.path);
+        assert!((modeler.path[0].t - 0.0).abs() <= EPSILON);
+        assert!((modeler.path.last().unwrap().t - 6.0).abs() <= EPSILON);
     }
 
     #[test]
@@ -756,6 +769,7 @@ mod tests {
 
         assert!(!modeler.path.is_empty());
         assert!(modeler.path.iter().copied().all(PathPoint::is_finite));
+        assert_monotonic_path_t(&modeler.path);
     }
 
     #[test]
@@ -772,12 +786,13 @@ mod tests {
                 &[input(20.0, 0.0, 0.2)],
             )
             .unwrap();
-        assert!(modeler.path.iter().any(|point| point.position.x > 15.0));
+        assert!(modeler.path.iter().any(|point| point.x > 15.0));
 
         modeler.enqueue(&[], &[input(10.0, 20.0, 0.2)]).unwrap();
 
-        assert!(!modeler.path.iter().any(|point| point.position.x > 15.0));
-        assert!(modeler.path.iter().any(|point| point.position.y > 10.0));
+        assert!(!modeler.path.iter().any(|point| point.x > 15.0));
+        assert!(modeler.path.iter().any(|point| point.y > 10.0));
+        assert_monotonic_path_t(&modeler.path);
     }
 
     #[test]
@@ -866,10 +881,12 @@ mod tests {
     fn non_finite_input_returns_error() {
         let mut modeler = WillInputModeler::default();
         let sample = Input {
-            position: vec2(f32::NAN, 0.0),
+            x: f32::NAN,
+            y: 0.0,
             timestamp: 0.0,
             pressure: 1.0,
-            tilt: vec2(0.0, 0.0),
+            tilt_x: 0.0,
+            tilt_y: 0.0,
         };
 
         let error = modeler.enqueue(&[sample], &[]).unwrap_err();
@@ -946,7 +963,7 @@ mod tests {
         let mut modeler = modeler_without_lag();
         modeler.enqueue(&[input(0.0, 0.0, 0.0)], &[]).unwrap();
         let original_path_len = modeler.path.len();
-        let original_first_position = modeler.path[0].position;
+        let original_first_position = (modeler.path[0].x, modeler.path[0].y);
         let original_stable_len = modeler.stable_len;
         let original_cached_len = modeler.inputs.cached_inputs.len();
         let original_predicted_start = modeler.inputs.predicted_start;
@@ -961,13 +978,19 @@ mod tests {
             InputModelError::NonMonotonicTimestamp { .. }
         ));
         assert_eq!(modeler.path.len(), original_path_len);
-        assert_eq!(modeler.path[0].position, original_first_position);
+        assert_eq!(
+            (modeler.path[0].x, modeler.path[0].y),
+            original_first_position
+        );
         assert_eq!(modeler.stable_len, original_stable_len);
         assert_eq!(modeler.inputs.cached_inputs.len(), original_cached_len);
         assert_eq!(modeler.inputs.predicted_start, original_predicted_start);
         assert_eq!(
-            modeler.smoother.committed.map(|state| state.level.position),
-            original_committed.map(|state| state.level.position)
+            modeler
+                .smoother
+                .committed
+                .map(|state| (state.level.x, state.level.y)),
+            original_committed.map(|state| (state.level.x, state.level.y))
         );
     }
 
@@ -1008,6 +1031,38 @@ mod tests {
     }
 
     #[test]
+    fn incremental_rebuild_keeps_path_t_monotonic_after_stable_prefix() {
+        let mut modeler = WillInputModeler::with_config(WillInputModelerConfig {
+            smoothing_alpha: 1.0,
+            smoothing_beta: 1.0,
+            interpolation_spacing: 1.0,
+            stable_lookahead: 1,
+        });
+
+        modeler
+            .enqueue(
+                &[
+                    input(0.0, 0.0, 0.0),
+                    input(4.0, 0.0, 0.1),
+                    input(8.0, 0.0, 0.2),
+                    input(12.0, 0.0, 0.3),
+                ],
+                &[input(16.0, 0.0, 0.4)],
+            )
+            .unwrap();
+
+        let stable_len = modeler.stable_len();
+        let stable_t = modeler.path[stable_len - 1].t;
+
+        modeler
+            .enqueue(&[input(16.0, 0.0, 0.4)], &[input(20.0, 4.0, 0.5)])
+            .unwrap();
+
+        assert!(modeler.path[stable_len - 1].t >= stable_t - EPSILON);
+        assert_monotonic_path_t(&modeler.path);
+    }
+
+    #[test]
     fn prediction_does_not_mutate_committed_smoother_state() {
         let mut modeler = WillInputModeler::default();
         modeler
@@ -1020,14 +1075,20 @@ mod tests {
                 &[],
             )
             .unwrap();
-        let committed = modeler.smoother.committed.map(|state| state.level.position);
+        let committed = modeler
+            .smoother
+            .committed
+            .map(|state| (state.level.x, state.level.y));
 
         modeler
             .enqueue(&[], &[input(40.0, 40.0, 0.3), input(48.0, 48.0, 0.4)])
             .unwrap();
 
         assert_eq!(
-            modeler.smoother.committed.map(|state| state.level.position),
+            modeler
+                .smoother
+                .committed
+                .map(|state| (state.level.x, state.level.y)),
             committed
         );
     }

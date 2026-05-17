@@ -5,7 +5,7 @@ edition.workspace = true
 
 [dependencies]
 bytemuck.workspace = true
-nalgebra.workspace = true
 ordered-float.workspace = true
+peniko.workspace = true
 smallvec.workspace = true
 thiserror.workspace = true

@@ -1,3 +1,6 @@
+use ordered_float::OrderedFloat;
+use peniko::Color;
+
 /// The geometry of brush. The simplest model is one circle.
 /// ultimately we want it to be a 3D shape projecting to the 2D plane,
 /// parametried by altitude angle and pressure. Thus the circle is a projection
@@ -7,12 +10,13 @@
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum BrushTip {
     Round(RoundTip),
+    FixedRound(RoundTip),
     // ConvexPolygon(PolygonBrush),
 }
 
 #[derive(Clone, Copy, Debug)]
 pub struct StrokePaint {
-    pub color: [f32; 4],
+    pub color: Color,
     pub width: f32,
     pub sharpness: f32,
 }
@@ -28,25 +32,16 @@ pub struct Brush {
 /// This backend does not need a brush vertex buffer. The shader reads adjacent
 /// path points and draws one analytic capsule per segment.
 #[repr(C)]
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct RoundTip {
     /// Base circle radius in path/world units.
     pub radius: OrderedFloat<f32>,
-
-    /// Pressure response mode.
-    ///
-    /// `0` keeps a fixed radius. `1` multiplies radius by path pressure.
-    pub pressure_mode: u32,
-
-    pub _pad0: [u32; 2],
 }
 
 impl RoundTip {
     pub fn new(radius: f32) -> Self {
         Self {
             radius: OrderedFloat(radius),
-            pressure_mode: 1,
-            _pad0: [0; 2],
         }
     }
 }
@@ -56,5 +51,3 @@ impl BrushTip {
         Self::Round(RoundTip::new(radius))
     }
 }
-
-use ordered_float::OrderedFloat;

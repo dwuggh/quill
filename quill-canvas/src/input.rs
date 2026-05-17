@@ -5,57 +5,34 @@
 //! `Canvas` facade and from a Bevy app using `QuillPlugin`.
 
 use bevy_ecs::prelude::*;
-use quill_stroke::{
-    brush::Brush,
-    input::{Input, Vec2},
-};
+use quill_stroke::input::{Input, InputModeler, WillInputModeler};
 
-use crate::page::PageConfig;
+use crate::{element::Tool, element::page::PageConfig};
 
-/// Active tool used when pointer input creates or edits scene content.
-#[derive(Clone, Copy, Debug)]
-pub enum Tool {
-    /// Draw modeled strokes with the configured brush.
-    Stroke(Brush),
-    /// Placeholder for future eraser behavior.
-    Eraser,
-    /// Placeholder for future selection/edit behavior.
-    Selection,
-}
-
-/// Global canvas mode resource.
+/// Global stroke input modeler.
 ///
-/// For now the mode is just the current tool. Brush style lives inside
-/// `Tool::Stroke`, so a pointer-down event can snapshot the whole tool state
-/// onto the new stroke entity.
-#[derive(Resource, Clone, Copy, Debug)]
-pub struct CanvasMode {
-    pub tool: Tool,
+/// The modeler is stateful across pointer samples while a stroke is active.
+/// It is reset when a stroke begins and when it finishes.
+#[derive(Resource)]
+pub struct GlobalInputModeler {
+    /// Stateful input-to-path modeler used while a stroke is active.
+    pub modeler: Box<dyn InputModeler + Send + Sync + 'static>,
 }
 
-impl CanvasMode {
-    /// Create a mode resource with the given active tool.
-    pub fn new(tool: Tool) -> Self {
-        Self { tool }
+impl Default for GlobalInputModeler {
+    fn default() -> Self {
+        Self {
+            modeler: Box::new(WillInputModeler::new()),
+        }
     }
 }
 
-/// Latest pointer state observed by the canvas.
-#[derive(Resource, Clone, Copy, Debug, Default)]
-pub struct PointerState {
-    /// Whether the pointer is currently inside the canvas surface.
-    pub inside: bool,
-    /// Last known pointer position in canvas coordinates.
-    pub position: Option<Vec2>,
-    /// Whether the active pointer is pressed.
-    pub pressed: bool,
-}
-
+// TODO consider use ui_event here
 /// Pointer/stylus input understood by the scene model.
 #[derive(Message, Clone, Copy, Debug)]
 pub enum CanvasInput {
     /// Pointer entered the canvas at the given position.
-    PointerEnter(Vec2),
+    PointerEnter([f32; 2]),
     /// Pointer left the canvas.
     PointerLeave,
     /// Pointer moved, optionally extending the active stroke.

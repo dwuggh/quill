@@ -1,9 +1,10 @@
 struct PathPoint {
-    position: vec2<f32>,
+    x: f32,
+    y: f32,
     pressure: f32,
     altitude: f32,
     azimuth: f32,
-    _pad: f32,
+    t: f32,
 };
 
 struct StrokeParams {
@@ -56,7 +57,7 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32, @builtin(instance_index) in
     );
 
     let local = corners[vertex_index];
-    let stroke_position = point.position + local;
+    let stroke_position = vec2<f32>(point.x, point.y) + local;
 
     var output: VertexOutput;
     output.clip_position = view.clip_from_world * local_transform.world_from_local * vec4<f32>(stroke_position.xy, 0.0, 1.0);

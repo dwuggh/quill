@@ -1,9 +1,10 @@
 struct PathPoint {
-    position: vec2<f32>,
+    x: f32,
+    y: f32,
     pressure: f32,
     altitude: f32,
     azimuth: f32,
-    _pad: f32,
+    t: f32,
 };
 
 struct StrokeParams {
@@ -47,7 +48,9 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32, @builtin(instance_index) in
     let segment_index = instance_index;
     let a = path[segment_index];
     let b = path[segment_index + 1u];
-    let delta = b.position - a.position;
+    let a_position = vec2<f32>(a.x, a.y);
+    let b_position = vec2<f32>(b.x, b.y);
+    let delta = b_position - a_position;
     let segment_length = length(delta);
     var tangent = vec2<f32>(1.0, 0.0);
     if segment_length > 0.00001 {
@@ -66,7 +69,7 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32, @builtin(instance_index) in
     );
 
     let local = corners[vertex_index];
-    let stroke_position = a.position + tangent * local.x + normal * local.y;
+    let stroke_position = a_position + tangent * local.x + normal * local.y;
 
     var output: VertexOutput;
     output.clip_position = view.clip_from_world * local_transform.world_from_local * vec4<f32>(stroke_position.xy, 0.0, 1.0);

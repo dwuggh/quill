@@ -3,17 +3,23 @@
 //! The input modeler is global while a stroke is active. Each completed or
 //! active stroke entity stores the brush snapshot and the latest modeled path.
 
-use bevy::{math::Mat3, transform::components::Transform};
+use bevy::{
+    app::{Plugin, Update},
+    transform::components::Transform,
+};
+use bevy_ecs::message::MessageRegistry;
 use bevy_ecs::prelude::*;
 use quill_stroke::{
     brush::Brush,
-    input::{Input, InputModeler, ModelUpdate, ModelUpdateMeta, PathPoint, WillInputModeler},
+    input::{Input, ModelUpdate, ModelUpdateMeta, PathPoint},
 };
 
 use crate::{
-    canvas::CanvasErrors,
+    canvas::{CanvasErrors, CanvasMode},
+    element::{StrokeMessage, Tool, eraser::StrokeBounds},
     error::CanvasError,
-    input::{CanvasInput, CanvasMode, PointerState, Tool},
+    input::{CanvasInput, GlobalInputModeler},
+    plugin::QuillUpdateSet,
 };
 
 /// Brush metadata attached to a stroke entity.
@@ -44,7 +50,7 @@ pub struct StrokeData {
 }
 
 impl StrokeData {
-    fn new(brush: StrokeBrush, update: ModelUpdate<'_>) -> Self {
+    pub(crate) fn new(brush: StrokeBrush, update: ModelUpdate<'_>) -> Self {
         Self {
             points: update.updated.to_vec(),
             status: StrokeStatus::Active {
@@ -54,7 +60,15 @@ impl StrokeData {
         }
     }
 
-    fn apply_update(&mut self, update: ModelUpdate<'_>) {
+    pub(crate) fn from_finished_points(brush: StrokeBrush, points: Vec<PathPoint>) -> Self {
+        Self {
+            points,
+            status: StrokeStatus::Finished,
+            brush,
+        }
+    }
+
+    pub(crate) fn apply_update(&mut self, update: ModelUpdate<'_>) {
         let from = update.metadata.invalidated_from.min(self.points.len());
         self.points.truncate(from);
         self.points.extend_from_slice(update.updated);
@@ -63,7 +77,7 @@ impl StrokeData {
         };
     }
 
-    fn finish(&mut self) {
+    pub(crate) fn finish(&mut self) {
         self.status = StrokeStatus::Finished;
     }
 }
@@ -75,80 +89,53 @@ pub struct ActiveStroke {
     pub entity: Option<Entity>,
 }
 
-/// Global stroke input modeler.
-///
-/// The modeler is stateful across pointer samples while a stroke is active.
-/// It is reset when a stroke begins and when it finishes.
-#[derive(Resource)]
-pub struct GlobalInputModeler {
-    /// Stateful input-to-path modeler used while a stroke is active.
-    pub modeler: Box<dyn InputModeler + Send + Sync + 'static>,
-}
+pub(crate) struct StrokeElementPlugin;
 
-impl Default for GlobalInputModeler {
-    fn default() -> Self {
-        Self {
-            modeler: Box::new(WillInputModeler::new()),
-        }
+impl Plugin for StrokeElementPlugin {
+    fn build(&self, app: &mut bevy::app::App) {
+        let world = app.world_mut();
+        MessageRegistry::register_message::<StrokeMessage>(world);
+        world.init_resource::<ActiveStroke>();
+        world.insert_resource(GlobalInputModeler::default());
+
+        app.add_systems(
+            Update,
+            process_stroke_msg.in_set(QuillUpdateSet::ToolMessages),
+        );
     }
 }
 
-pub(crate) fn update_pointer_state(
-    mut inputs: MessageReader<CanvasInput>,
-    mut pointer: ResMut<PointerState>,
-) {
-    for input in inputs.read() {
-        match *input {
-            CanvasInput::PointerEnter(position) => {
-                pointer.inside = true;
-                pointer.position = Some(position);
-            }
-            CanvasInput::PointerLeave => {
-                pointer.inside = false;
-            }
-            CanvasInput::PointerMove(input) => {
-                pointer.position = Some(input.position());
-            }
-            CanvasInput::PointerDown(input) => {
-                pointer.inside = true;
-                pointer.pressed = true;
-                pointer.position = Some(input.position());
-            }
-            CanvasInput::PointerUp(input) => {
-                pointer.pressed = false;
-                pointer.position = Some(input.position());
-            }
-        }
-    }
-}
-
-pub(crate) fn process_canvas_input(
+pub(crate) fn process_stroke_msg(
     mut commands: Commands,
-    mut inputs: MessageReader<CanvasInput>,
+    mut messages: MessageReader<StrokeMessage>,
     mode: Res<CanvasMode>,
     mut active: ResMut<ActiveStroke>,
     mut modeler: ResMut<GlobalInputModeler>,
-    mut paths: Query<&mut StrokeData>,
+    mut paths: Query<(&mut StrokeData, &mut StrokeBounds)>,
     mut errors: ResMut<CanvasErrors>,
 ) {
-    for input in inputs.read() {
-        match *input {
+    let Tool::Stroke(brush) = mode.tool else {
+        for _ in messages.read() {}
+        return;
+    };
+
+    for msg in messages.read() {
+        match msg.input {
             CanvasInput::PointerEnter(_) | CanvasInput::PointerLeave => {}
             CanvasInput::PointerDown(input) => {
                 active.entity = None;
 
-                if let Tool::Stroke(brush) = mode.tool {
-                    // A new stroke owns a fresh modeler state and snapshots the
-                    // current brush, so later tool changes do not rewrite it.
-                    modeler.modeler.reset();
-                    match modeler.modeler.enqueue(&[input], &[]) {
-                        Ok(update) => {
-                            let data = StrokeData::new(StrokeBrush { brush }, update);
-                            let entity = commands.spawn((data, Transform::IDENTITY)).id();
-                            active.entity = Some(entity);
-                        }
-                        Err(error) => errors.0.push(CanvasError::from(error)),
+                // A new stroke owns a fresh modeler state and snapshots the
+                // current brush, so later tool changes do not rewrite it.
+                modeler.modeler.reset();
+                match modeler.modeler.enqueue(&[input], &[]) {
+                    Ok(update) => {
+                        let data = StrokeData::new(StrokeBrush { brush }, update);
+                        let bounds = StrokeBounds::from_points(&data.points);
+                        let entity = commands.spawn((data, bounds, Transform::IDENTITY)).id();
+                        active.entity = Some(entity);
                     }
+                    Err(error) => errors.0.push(CanvasError::from(error)),
                 }
             }
             CanvasInput::PointerMove(input) => {
@@ -159,7 +146,7 @@ pub(crate) fn process_canvas_input(
             CanvasInput::PointerUp(input) => {
                 if let Some(entity) = active.entity.take() {
                     update_active_path(entity, input, &mut modeler, &mut paths, &mut errors);
-                    if let Ok(mut path) = paths.get_mut(entity) {
+                    if let Ok((mut path, _)) = paths.get_mut(entity) {
                         path.finish();
                     }
                     modeler.modeler.reset();
@@ -173,12 +160,15 @@ fn update_active_path(
     entity: Entity,
     input: Input,
     modeler: &mut GlobalInputModeler,
-    paths: &mut Query<&mut StrokeData>,
+    paths: &mut Query<(&mut StrokeData, &mut StrokeBounds)>,
     errors: &mut CanvasErrors,
 ) {
     match modeler.modeler.enqueue(&[input], &[]) {
         Ok(update) => match paths.get_mut(entity) {
-            Ok(mut path) => path.apply_update(update),
+            Ok((mut path, mut bounds)) => {
+                path.apply_update(update);
+                *bounds = StrokeBounds::from_points(&path.points);
+            }
             Err(error) => errors.0.push(CanvasError::MissingActiveStroke {
                 entity,
                 reason: error.to_string(),
