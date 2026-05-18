@@ -7,7 +7,9 @@ use bevy_ecs::prelude::*;
 
 /// Configuration used when creating a page.
 #[derive(Clone, Copy, Debug, Default)]
-pub struct PageConfig;
+pub struct PageConfig {
+    parent: u32,
+}
 
 /// Page component attached to page entities.
 #[derive(Component, Clone, Copy, Debug)]

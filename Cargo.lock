@@ -5927,6 +5927,7 @@ dependencies = [
  "futures-lite",
  "peniko",
  "quill_stroke",
+ "smallvec",
  "spin_on",
  "thiserror 2.0.17",
  "tracing",

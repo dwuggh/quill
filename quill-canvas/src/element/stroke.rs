@@ -16,7 +16,10 @@ use quill_stroke::{
 
 use crate::{
     canvas::{CanvasErrors, CanvasMode},
-    element::{StrokeMessage, Tool, eraser::StrokeBounds},
+    element::{
+        StrokeMessage, Tool,
+        bounds::{DEFAULT_BOUND_BLOCK_SIZE, RectBound},
+    },
     error::CanvasError,
     input::{CanvasInput, GlobalInputModeler},
     plugin::QuillUpdateSet,
@@ -111,7 +114,7 @@ pub(crate) fn process_stroke_msg(
     mode: Res<CanvasMode>,
     mut active: ResMut<ActiveStroke>,
     mut modeler: ResMut<GlobalInputModeler>,
-    mut paths: Query<(&mut StrokeData, &mut StrokeBounds)>,
+    mut paths: Query<(&mut StrokeData, Option<&mut RectBound>)>,
     mut errors: ResMut<CanvasErrors>,
 ) {
     let Tool::Stroke(brush) = mode.tool else {
@@ -131,8 +134,13 @@ pub(crate) fn process_stroke_msg(
                 match modeler.modeler.enqueue(&[input], &[]) {
                     Ok(update) => {
                         let data = StrokeData::new(StrokeBrush { brush }, update);
-                        let bounds = StrokeBounds::from_points(&data.points);
-                        let entity = commands.spawn((data, bounds, Transform::IDENTITY)).id();
+                        let bounds = rect_bound_from_path_points(&data.points);
+                        let entity = match bounds {
+                            Some(bounds) => {
+                                commands.spawn((data, bounds, Transform::IDENTITY)).id()
+                            }
+                            None => commands.spawn((data, Transform::IDENTITY)).id(),
+                        };
                         active.entity = Some(entity);
                     }
                     Err(error) => errors.0.push(CanvasError::from(error)),
@@ -140,12 +148,26 @@ pub(crate) fn process_stroke_msg(
             }
             CanvasInput::PointerMove(input) => {
                 if let Some(entity) = active.entity {
-                    update_active_path(entity, input, &mut modeler, &mut paths, &mut errors);
+                    update_active_path(
+                        &mut commands,
+                        entity,
+                        input,
+                        &mut modeler,
+                        &mut paths,
+                        &mut errors,
+                    );
                 }
             }
             CanvasInput::PointerUp(input) => {
                 if let Some(entity) = active.entity.take() {
-                    update_active_path(entity, input, &mut modeler, &mut paths, &mut errors);
+                    update_active_path(
+                        &mut commands,
+                        entity,
+                        input,
+                        &mut modeler,
+                        &mut paths,
+                        &mut errors,
+                    );
                     if let Ok((mut path, _)) = paths.get_mut(entity) {
                         path.finish();
                     }
@@ -157,17 +179,24 @@ pub(crate) fn process_stroke_msg(
 }
 
 fn update_active_path(
+    commands: &mut Commands,
     entity: Entity,
     input: Input,
     modeler: &mut GlobalInputModeler,
-    paths: &mut Query<(&mut StrokeData, &mut StrokeBounds)>,
+    paths: &mut Query<(&mut StrokeData, Option<&mut RectBound>)>,
     errors: &mut CanvasErrors,
 ) {
     match modeler.modeler.enqueue(&[input], &[]) {
         Ok(update) => match paths.get_mut(entity) {
-            Ok((mut path, mut bounds)) => {
+            Ok((mut path, bounds)) => {
                 path.apply_update(update);
-                *bounds = StrokeBounds::from_points(&path.points);
+                if let Some(updated) = rect_bound_from_path_points(&path.points) {
+                    if let Some(mut bounds) = bounds {
+                        *bounds = updated;
+                    } else {
+                        commands.entity(entity).insert(updated);
+                    }
+                }
             }
             Err(error) => errors.0.push(CanvasError::MissingActiveStroke {
                 entity,
@@ -176,4 +205,13 @@ fn update_active_path(
         },
         Err(error) => errors.0.push(CanvasError::from(error)),
     }
+}
+
+pub(crate) fn rect_bound_from_path_points(points: &[PathPoint]) -> Option<RectBound> {
+    let points = points
+        .iter()
+        .copied()
+        .map(|point| bevy::math::Vec2::new(point.x(), point.y()))
+        .collect::<Vec<_>>();
+    RectBound::from_points_with_children(&points, DEFAULT_BOUND_BLOCK_SIZE)
 }

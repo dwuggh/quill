@@ -10,6 +10,7 @@ use quill_stroke::brush::{Brush, BrushTip, StrokePaint};
 
 use crate::{canvas::CanvasMode, input::CanvasInput};
 
+pub mod bounds;
 pub mod eraser;
 pub mod page;
 pub mod stroke;
@@ -77,6 +78,11 @@ impl Default for Tool {
 /// Placeholder state for future selection/edit behavior.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SelectionTool {}
+
+pub enum SelectionMode {
+    Pixel,
+    Item,
+}
 
 // pub struct PageTool {}
 

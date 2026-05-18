@@ -1,17 +1,12 @@
 //! Point-granularity stroke erasing.
 //!
-//! The eraser is a moving sweep, not scene content. It removes covered path
-//! points from existing strokes, then splits remaining contiguous point runs
-//! into independent stroke entities.
-
-use std::ops::Range;
+//! The eraser records the active pointer path as transient tool state. It
+//! removes covered path points from existing strokes, then splits remaining
+//! contiguous point runs into independent stroke entities.
 
 use bevy::{
     app::{Plugin, Update},
-    math::{
-        Vec2, Vec3,
-        bounding::{Aabb2d, IntersectsVolume},
-    },
+    math::{Vec2, Vec3, bounding::Aabb2d},
     transform::components::Transform,
 };
 use bevy_ecs::message::MessageRegistry;
@@ -20,14 +15,16 @@ use quill_stroke::input::{Input, PathPoint};
 
 use crate::{
     canvas::CanvasMode,
-    element::{EraserConfig, EraserMessage, EraserShape, Tool, stroke::StrokeData},
+    element::{
+        EraserConfig, EraserMessage, EraserShape, Tool,
+        bounds::{BoundHit, BoundKey, RectBound, RoundBound, aabb_from_min_max},
+        stroke::{StrokeData, rect_bound_from_path_points},
+    },
     input::CanvasInput,
     plugin::QuillUpdateSet,
 };
 
 pub struct Eraser;
-
-const POINT_BLOCK_SIZE: usize = 64;
 
 pub(crate) struct EraserElementPlugin;
 
@@ -44,45 +41,11 @@ impl Plugin for EraserElementPlugin {
     }
 }
 
-/// Last active eraser point while the pointer is pressed.
+/// Active eraser gesture while the pointer is pressed.
 #[derive(Resource, Default)]
 pub(crate) struct ActiveEraser {
-    /// Previous pressed pointer position used to build the next sweep segment.
-    position: Option<Vec2>,
-}
-
-/// Cached broad-phase bounds for a stroke.
-#[derive(Component, Clone, Debug, Default)]
-pub struct StrokeBounds {
-    pub bounds: Option<Aabb2d>,
-    pub blocks: Vec<PointBlockBounds>,
-}
-
-/// Bounds for a consecutive block of path points.
-#[derive(Clone, Debug)]
-pub struct PointBlockBounds {
-    pub range: Range<usize>,
-    pub bounds: Aabb2d,
-}
-
-impl StrokeBounds {
-    pub fn from_points(points: &[PathPoint]) -> Self {
-        let bounds = points_bounds(points, 0..points.len());
-        let blocks = points
-            .chunks(POINT_BLOCK_SIZE)
-            .enumerate()
-            .filter_map(|(block_index, chunk)| {
-                let start = block_index * POINT_BLOCK_SIZE;
-                let end = start + chunk.len();
-                points_bounds(points, start..end).map(|bounds| PointBlockBounds {
-                    range: start..end,
-                    bounds,
-                })
-            })
-            .collect();
-
-        Self { bounds, blocks }
-    }
+    /// Transient path used to erase strokes during the current pointer gesture.
+    path: Option<EraserPath>,
 }
 
 pub(crate) fn process_eraser_msg(
@@ -90,90 +53,79 @@ pub(crate) fn process_eraser_msg(
     mut messages: MessageReader<EraserMessage>,
     mode: Res<CanvasMode>,
     mut active: ResMut<ActiveEraser>,
-    strokes: Query<(Entity, &StrokeData, &StrokeBounds, &Transform)>,
+    strokes: Query<(Entity, &StrokeData, &RectBound, &Transform)>,
 ) {
     let Tool::Eraser(config) = mode.tool else {
-        active.position = None;
+        active.path = None;
         for _ in messages.read() {}
         return;
     };
 
-    let mut sweeps = Vec::new();
+    let mut pending_path = None;
     for msg in messages.read() {
-        if let Some(sweep) = active.apply_input(msg.input, config) {
-            sweeps.push(sweep);
+        if let Some(path) = active.apply_input(msg.input, config) {
+            pending_path = Some(path);
         }
     }
 
-    erase_with_sweeps(&mut commands, &strokes, &sweeps);
+    if let Some(path) = pending_path {
+        erase_with_path(&mut commands, &strokes, &path);
+    }
 }
 
 impl ActiveEraser {
-    /// Consume one routed eraser input and return the sweep it creates, if any.
-    fn apply_input(&mut self, input: CanvasInput, config: EraserConfig) -> Option<EraserSweep> {
+    /// Consume one routed eraser input and return the current path update.
+    fn apply_input(&mut self, input: CanvasInput, config: EraserConfig) -> Option<EraserPath> {
         match input {
             CanvasInput::PointerEnter(_) => None,
             CanvasInput::PointerLeave => {
-                self.position = None;
+                self.path = None;
                 None
             }
             CanvasInput::PointerDown(input) => {
                 let position = input_to_vec2(input);
-                self.position = Some(position);
-                Some(EraserSweep::new(position, position, config))
+                let path = EraserPath::new(position, config);
+                self.path = Some(path.clone());
+                Some(path)
             }
             CanvasInput::PointerMove(input) => {
-                let to = input_to_vec2(input);
-                let from = self.position?;
-                self.position = Some(to);
-                Some(EraserSweep::new(from, to, config))
+                let path = self.path.as_mut()?;
+                path.push(input_to_vec2(input));
+                Some(path.clone())
             }
             CanvasInput::PointerUp(input) => {
-                let to = input_to_vec2(input);
-                let from = self.position.take()?;
-                Some(EraserSweep::new(from, to, config))
+                let mut path = self.path.take()?;
+                path.push(input_to_vec2(input));
+                Some(path)
             }
         }
     }
 }
 
-fn erase_with_sweeps(
+fn erase_with_path(
     commands: &mut Commands,
-    strokes: &Query<(Entity, &StrokeData, &StrokeBounds, &Transform)>,
-    sweeps: &[EraserSweep],
+    strokes: &Query<(Entity, &StrokeData, &RectBound, &Transform)>,
+    path: &EraserPath,
 ) {
-    if sweeps.is_empty() {
-        return;
-    }
-
-    for (entity, stroke, stroke_bounds, transform) in strokes {
-        let Some(bounds) = stroke_bounds.bounds else {
-            continue;
-        };
-        let bounds = transform_aabb(transform, bounds);
-        if !sweeps
-            .iter()
-            .any(|sweep| bounds.intersects(&sweep.bounds()))
-        {
+    for (entity, stroke, rect_bound, transform) in strokes {
+        let world_bound = rect_bound.world(transform);
+        let hits = path.intersecting_hits(&world_bound);
+        if hits.is_empty() {
             continue;
         }
 
         let mut erased = vec![false; stroke.points.len()];
         let mut has_erased = false;
 
-        for block in &stroke_bounds.blocks {
-            let block_bounds = transform_aabb(transform, block.bounds);
-            let candidates: Vec<_> = sweeps
-                .iter()
-                .filter(|sweep| block_bounds.intersects(&sweep.bounds()))
-                .collect();
-            if candidates.is_empty() {
-                continue;
-            }
+        for hit in hits {
+            let range = match hit.key.clone() {
+                Some(BoundKey::Range(range)) => range,
+                None => 0..stroke.points.len(),
+            };
 
-            for point_index in block.range.clone() {
+            for point_index in range {
                 let point = transform_point(transform, point_to_vec2(stroke.points[point_index]));
-                if candidates.iter().any(|sweep| sweep.contains(point)) {
+                if path.contains(point) {
                     erased[point_index] = true;
                     has_erased = true;
                 }
@@ -201,15 +153,22 @@ fn replace_erased_stroke(
         }
         1 => {
             let data = StrokeData::from_finished_points(stroke.brush, fragments[0].clone());
-            let bounds = StrokeBounds::from_points(&data.points);
-            commands.entity(entity).insert((data, bounds));
+            let bounds = rect_bound_from_path_points(&data.points);
+            if let Some(bounds) = bounds {
+                commands.entity(entity).insert((data, bounds));
+            } else {
+                commands.entity(entity).insert(data).remove::<RectBound>();
+            }
         }
         _ => {
             commands.entity(entity).despawn();
             for points in fragments {
                 let data = StrokeData::from_finished_points(stroke.brush, points);
-                let bounds = StrokeBounds::from_points(&data.points);
-                commands.spawn((data, bounds, *transform));
+                if let Some(bounds) = rect_bound_from_path_points(&data.points) {
+                    commands.spawn((data, bounds, *transform));
+                } else {
+                    commands.spawn((data, *transform));
+                }
             }
         }
     }
@@ -239,54 +198,111 @@ fn push_fragment(fragments: &mut Vec<Vec<PathPoint>>, current: &mut Vec<PathPoin
     }
 }
 
-#[derive(Clone, Copy, Debug)]
-struct EraserSweep {
-    from: Vec2,
-    to: Vec2,
+/// Transient eraser path and its cached broad-phase bound.
+#[derive(Clone, Debug)]
+struct EraserPath {
     config: EraserConfig,
+    points: Vec<Vec2>,
+    rect_bound: RectBound,
 }
 
-impl EraserSweep {
-    fn new(from: Vec2, to: Vec2, config: EraserConfig) -> Self {
-        Self { from, to, config }
-    }
-
-    fn bounds(self) -> Aabb2d {
-        let size = self.config.size.max(0.0);
-        let min = self.from.min(self.to) - Vec2::splat(size);
-        let max = self.from.max(self.to) + Vec2::splat(size);
-        aabb_from_min_max(min, max)
-    }
-
-    fn contains(self, point: Vec2) -> bool {
-        match self.config.shape {
-            EraserShape::Circle => {
-                distance_squared_to_segment(point, self.from, self.to)
-                    <= self.config.size.max(0.0).powi(2)
-            }
-            EraserShape::Square => segment_intersects_aabb(
-                self.from,
-                self.to,
-                aabb_from_min_max(
-                    point - Vec2::splat(self.config.size.max(0.0)),
-                    point + Vec2::splat(self.config.size.max(0.0)),
-                ),
-            ),
+impl EraserPath {
+    fn new(position: Vec2, config: EraserConfig) -> Self {
+        let points = vec![position];
+        let rect_bound = Self::bound_for_points(&points, config);
+        Self {
+            config,
+            points,
+            rect_bound,
         }
     }
-}
 
-fn points_bounds(points: &[PathPoint], range: Range<usize>) -> Option<Aabb2d> {
-    let mut iter = points.get(range)?.iter().map(|point| point_to_vec2(*point));
-    let first = iter.next()?;
-    let (min, max) = iter.fold((first, first), |(min, max), point| {
-        (min.min(point), max.max(point))
-    });
-    Some(aabb_from_min_max(min, max))
-}
+    fn push(&mut self, position: Vec2) {
+        self.points.push(position);
+        self.rect_bound = Self::bound_for_points(&self.points, self.config);
+    }
 
-fn aabb_from_min_max(min: Vec2, max: Vec2) -> Aabb2d {
-    Aabb2d::new((min + max) * 0.5, (max - min) * 0.5)
+    fn rect_bound(&self) -> &RectBound {
+        &self.rect_bound
+    }
+
+    fn intersecting_hits(&self, rect_bound: &RectBound) -> Vec<BoundHit> {
+        match self.config.shape {
+            EraserShape::Circle => self.intersecting_round_hits(rect_bound),
+            EraserShape::Square => rect_bound
+                .intersects_rect(self.rect_bound().rect)
+                .map(Vec::from_iter)
+                .unwrap_or_default(),
+        }
+    }
+
+    fn intersecting_round_hits(&self, rect_bound: &RectBound) -> Vec<BoundHit> {
+        let mut hits = Vec::new();
+        let radius = self.config.size.max(0.0);
+
+        for point in self.points.iter().copied() {
+            if let Some(point_hits) = rect_bound.intersects_round(RoundBound::new(point, radius)) {
+                hits.extend(point_hits);
+            }
+        }
+
+        for segment in self.points.windows(2) {
+            if let Some(segment_hits) = rect_bound
+                .intersects_round(RoundBound::from_segment(segment[0], segment[1], radius))
+            {
+                hits.extend(segment_hits);
+            }
+        }
+
+        hits
+    }
+
+    fn bound_for_points(points: &[Vec2], config: EraserConfig) -> RectBound {
+        let size = Vec2::splat(config.size.max(0.0));
+        let first = points[0];
+        let (min, max) = points
+            .iter()
+            .copied()
+            .fold((first, first), |(min, max), point| {
+                (min.min(point), max.max(point))
+            });
+        RectBound::from_rect(aabb_from_min_max(min - size, max + size))
+    }
+
+    fn contains(&self, point: Vec2) -> bool {
+        match self.config.shape {
+            EraserShape::Circle => self.contains_circle(point),
+            EraserShape::Square => self.contains_square(point),
+        }
+    }
+
+    fn contains_circle(&self, point: Vec2) -> bool {
+        let radius = self.config.size.max(0.0);
+        self.points
+            .iter()
+            .copied()
+            .any(|center| RoundBound::new(center, radius).contains_point(point))
+            || self.points.windows(2).any(|segment| {
+                RoundBound::new(segment[0], radius).contains_point_swept_to(point, segment[1])
+            })
+    }
+
+    fn contains_square(&self, point: Vec2) -> bool {
+        let size = Vec2::splat(self.config.size.max(0.0));
+        let point_bound = aabb_from_min_max(point - size, point + size);
+        self.any_segment(|from, to| segment_intersects_aabb(from, to, point_bound))
+    }
+
+    fn any_segment(&self, mut contains: impl FnMut(Vec2, Vec2) -> bool) -> bool {
+        if self.points.len() == 1 {
+            let point = self.points[0];
+            return contains(point, point);
+        }
+
+        self.points
+            .windows(2)
+            .any(|segment| contains(segment[0], segment[1]))
+    }
 }
 
 fn point_to_vec2(point: PathPoint) -> Vec2 {
@@ -301,35 +317,6 @@ fn transform_point(transform: &Transform, point: Vec2) -> Vec2 {
     transform
         .transform_point(Vec3::new(point.x, point.y, 0.0))
         .truncate()
-}
-
-fn transform_aabb(transform: &Transform, bounds: Aabb2d) -> Aabb2d {
-    let corners = [
-        Vec2::new(bounds.min.x, bounds.min.y),
-        Vec2::new(bounds.min.x, bounds.max.y),
-        Vec2::new(bounds.max.x, bounds.min.y),
-        Vec2::new(bounds.max.x, bounds.max.y),
-    ];
-    let first = transform_point(transform, corners[0]);
-    let (min, max) = corners[1..]
-        .iter()
-        .copied()
-        .map(|point| transform_point(transform, point))
-        .fold((first, first), |(min, max), point| {
-            (min.min(point), max.max(point))
-        });
-    aabb_from_min_max(min, max)
-}
-
-fn distance_squared_to_segment(point: Vec2, a: Vec2, b: Vec2) -> f32 {
-    let segment = b - a;
-    let length_squared = segment.length_squared();
-    if length_squared <= f32::EPSILON {
-        return point.distance_squared(a);
-    }
-
-    let t = ((point - a).dot(segment) / length_squared).clamp(0.0, 1.0);
-    point.distance_squared(a + segment * t)
 }
 
 fn segment_intersects_aabb(a: Vec2, b: Vec2, bounds: Aabb2d) -> bool {
@@ -407,23 +394,23 @@ mod tests {
     }
 
     #[test]
-    fn circle_sweep_checks_distance_to_center_segment() {
-        let sweep = EraserSweep::new(
+    fn circle_path_checks_distance_to_center_segments() {
+        let mut path = EraserPath::new(
             Vec2::new(0.0, 0.0),
-            Vec2::new(10.0, 0.0),
             EraserConfig::new(EraserShape::Circle, 1.0),
         );
+        path.push(Vec2::new(10.0, 0.0));
 
-        assert!(sweep.contains(Vec2::new(5.0, 0.5)));
-        assert!(!sweep.contains(Vec2::new(5.0, 2.0)));
+        assert!(path.contains(Vec2::new(5.0, 0.5)));
+        assert!(!path.contains(Vec2::new(5.0, 2.0)));
     }
 
     #[test]
-    fn stroke_bounds_builds_whole_and_block_bounds() {
+    fn rect_bound_builds_whole_and_child_bounds() {
         let points = vec![point(0.0, 0.0), point(10.0, 4.0)];
-        let bounds = StrokeBounds::from_points(&points);
+        let bounds = rect_bound_from_path_points(&points).unwrap();
 
-        assert!(bounds.bounds.is_some());
-        assert_eq!(bounds.blocks.len(), 1);
+        assert!((bounds.rect.max.x - bounds.rect.min.x) >= 10.0);
+        assert_eq!(bounds.children.as_ref().unwrap().len(), 1);
     }
 }
