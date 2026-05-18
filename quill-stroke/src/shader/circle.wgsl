@@ -5,6 +5,7 @@ struct PathPoint {
     altitude: f32,
     azimuth: f32,
     t: f32,
+    visibility: u32,
 };
 
 struct StrokeParams {
@@ -12,6 +13,7 @@ struct StrokeParams {
     pressure_mode: u32,
     sample_count: u32,
     dirty_segment_start: u32,
+    color: vec4<f32>,
 };
 
 struct VertexOutput {
@@ -37,6 +39,10 @@ struct LocalUniform {
 @group(1) @binding(1) var<uniform> stroke: StrokeParams;
 
 fn segment_radius(a: PathPoint, b: PathPoint) -> f32 {
+    if a.visibility == 0u || b.visibility == 0u {
+        return 0.0;
+    }
+
     if stroke.pressure_mode == 1u {
         return max(stroke.radius * max((a.pressure + b.pressure) * 0.5, 0.0), 0.0);
     }
@@ -90,5 +96,5 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let closest = vec2<f32>(clamped_x, 0.0);
     let signed_distance = length(input.local - closest) - radius;
     let coverage = clamp(0.5 - signed_distance, 0.0, 1.0);
-    return vec4<f32>(0.0, 0.0, 0.0, coverage);
+    return vec4<f32>(stroke.color.rgb, stroke.color.a * coverage);
 }

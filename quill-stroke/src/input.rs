@@ -50,8 +50,11 @@ impl Input {
     }
 }
 
+const PATH_POINT_VISIBLE: u32 = 1;
+const PATH_POINT_HIDDEN: u32 = 0;
+
 #[repr(C)]
-#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Debug, Clone, Copy, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct PathPoint {
     x: f32,
     y: f32,
@@ -59,31 +62,58 @@ pub struct PathPoint {
     altitude: f32,
     azimuth: f32,
     t: f32,
+    visibility: u32,
 }
 
 impl PathPoint {
+    /// Return the x coordinate in stroke-local canvas space.
     pub fn x(self) -> f32 {
         self.x
     }
 
+    /// Return the y coordinate in stroke-local canvas space.
     pub fn y(self) -> f32 {
         self.y
     }
 
+    /// Return normalized pressure for pressure-sensitive brushes.
     pub fn pressure(self) -> f32 {
         self.pressure
     }
 
+    /// Return the altitude-like tablet value currently stored for this point.
     pub fn altitude(self) -> f32 {
         self.altitude
     }
 
+    /// Return the azimuth-like tablet value currently stored for this point.
     pub fn azimuth(self) -> f32 {
         self.azimuth
     }
 
+    /// Return the path parameter used by interpolation.
     pub fn t(self) -> f32 {
         self.t
+    }
+
+    /// Return whether this point should contribute to visible stroke rendering.
+    pub fn is_visible(self) -> bool {
+        self.visibility != PATH_POINT_HIDDEN
+    }
+
+    /// Set whether this point contributes to visible stroke rendering.
+    pub fn set_visible(&mut self, visible: bool) {
+        self.visibility = if visible {
+            PATH_POINT_VISIBLE
+        } else {
+            PATH_POINT_HIDDEN
+        };
+    }
+
+    /// Return a copy of this point with the requested visibility state.
+    pub fn with_visibility(mut self, visible: bool) -> Self {
+        self.set_visible(visible);
+        self
     }
 }
 

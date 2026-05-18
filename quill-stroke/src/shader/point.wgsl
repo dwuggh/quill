@@ -5,6 +5,7 @@ struct PathPoint {
     altitude: f32,
     azimuth: f32,
     t: f32,
+    visibility: u32,
 };
 
 struct StrokeParams {
@@ -45,7 +46,10 @@ struct LocalUniform {
 fn vs_main(@builtin(vertex_index) vertex_index: u32, @builtin(instance_index) instance_index: u32) -> VertexOutput {
     let point = path[instance_index];
     let pressure = clamp(point.pressure, 0.0, 1.0);
-    let radius = max(style.radius * pressure, 0.0);
+    var radius = max(style.radius * pressure, 0.0);
+    if point.visibility == 0u {
+        radius = 0.0;
+    }
 
     var corners = array<vec2<f32>, 6>(
         vec2<f32>(-radius, -radius),

@@ -5,7 +5,7 @@ use bevy::{
     asset::{Assets, Handle},
     core_pipeline::core_2d::{CORE_2D_DEPTH_FORMAT, Transparent2d},
     image::BevyDefault,
-    math::{FloatOrd, Mat4},
+    math::{FloatOrd, Mat4, Vec4},
     prelude::{Commands, Component, Entity, Res, ResMut, Resource},
     render::{
         Extract, ExtractSchedule, Render, RenderApp, RenderStartup, RenderSystems,
@@ -40,6 +40,7 @@ use bevy_ecs::{
 };
 use quill_stroke::{brush::BrushTip, gpu::ROUND_SHADER, input::PathPoint};
 
+use crate::canvas::CanvasOrder;
 use crate::element::stroke::{StrokeData, StrokeStatus};
 
 #[derive(Clone, Copy, Component, Debug, ShaderType)]
@@ -48,6 +49,7 @@ struct StrokeParamsUniform {
     pressure_mode: u32,
     sample_count: u32,
     dirty_segment_start: u32,
+    color: Vec4,
 }
 
 impl StrokeParamsUniform {
@@ -66,8 +68,13 @@ impl StrokeParamsUniform {
             pressure_mode,
             sample_count: stroke.points.len() as u32,
             dirty_segment_start,
+            color: peniko_color_to_vec4(stroke.brush.brush.paint.color),
         }
     }
+}
+
+fn peniko_color_to_vec4(color: peniko::Color) -> Vec4 {
+    Vec4::from_array(color.components)
 }
 
 #[derive(Clone, Copy, Component, Debug, ShaderType)]
@@ -125,6 +132,13 @@ pub struct StrokePipeline {
 #[derive(Resource, Default)]
 struct StrokeViewBindGroup {
     value: Option<BindGroup>,
+}
+
+/// Render-world copy of canvas stroke order using render entities.
+#[derive(Resource, Default)]
+struct RenderCanvasOrder {
+    /// Strokes in document draw order, converted from main-world entities.
+    strokes: Vec<Entity>,
 }
 
 impl SpecializedRenderPipeline for StrokePipeline {
@@ -195,6 +209,7 @@ impl Plugin for StrokeRenderPlugin {
                 .insert_resource(StrokeShader(shader))
                 .init_resource::<SpecializedRenderPipelines<StrokePipeline>>()
                 .init_resource::<StrokeViewBindGroup>()
+                .init_resource::<RenderCanvasOrder>()
                 .init_resource::<Assets<Shader>>()
                 .add_systems(RenderStartup, init_stroke_pipeline)
                 .add_systems(ExtractSchedule, extract_strokes)
@@ -238,7 +253,7 @@ fn init_stroke_pipeline(mut commands: Commands, stroke_shader: Res<StrokeShader>
             },
             BindGroupLayoutEntry {
                 binding: 1,
-                visibility: ShaderStages::VERTEX,
+                visibility: ShaderStages::VERTEX_FRAGMENT,
                 ty: BindingType::Buffer {
                     ty: BufferBindingType::Uniform,
                     has_dynamic_offset: true,
@@ -291,9 +306,6 @@ struct RenderStrokeInstance {
 
     /// Brush tip family used to specialize the render pipeline.
     tip: StrokeTipKind,
-
-    /// Z sort position derived from the stroke transform.
-    sort_z: f32,
 }
 
 impl Default for RenderStrokeInstance {
@@ -305,47 +317,48 @@ impl Default for RenderStrokeInstance {
             segment_count: 0,
             dirty_from: None,
             tip: StrokeTipKind::Round,
-            sort_z: 0.0,
         }
     }
 }
 
 impl RenderStrokeInstance {
-    fn from_stroke(stroke: &StrokeData, transform: &GlobalTransform) -> Self {
+    fn from_stroke(stroke: &StrokeData) -> Self {
         let mut instance = Self::default();
         instance.update_from_stroke(stroke);
-        instance.update_transform(transform);
         instance
     }
 
     fn update_from_stroke(&mut self, stroke: &StrokeData) {
-        let invalidated_from = match stroke.status {
-            StrokeStatus::Active { last_update } => last_update.invalidated_from,
-            StrokeStatus::Finished => 0,
-        };
-        let dirty_from = if self.path.is_empty()
-            || invalidated_from > self.path.len()
-            || invalidated_from > stroke.points.len()
-        {
-            0
-        } else {
-            invalidated_from
+        let dirty_from = match stroke.status {
+            StrokeStatus::Active { last_update } => {
+                let invalidated_from = last_update.invalidated_from;
+                Some(
+                    if self.path.is_empty()
+                        || invalidated_from > self.path.len()
+                        || invalidated_from > stroke.points.len()
+                    {
+                        0
+                    } else {
+                        invalidated_from
+                    },
+                )
+            }
+            StrokeStatus::Finished => first_changed_point(self.path.values(), &stroke.points),
         };
 
-        self.path.truncate(dirty_from);
-        self.path
-            .values_mut()
-            .extend_from_slice(&stroke.points[dirty_from..]);
+        if let Some(dirty_from) = dirty_from {
+            self.path.truncate(dirty_from);
+            self.path
+                .values_mut()
+                .extend_from_slice(&stroke.points[dirty_from..]);
+            self.dirty_from = Some(
+                self.dirty_from
+                    .map_or(dirty_from, |current| current.min(dirty_from)),
+            );
+        }
+
         self.segment_count = stroke.points.len().saturating_sub(1) as u32;
         self.tip = stroke.brush.brush.tip.into();
-        self.dirty_from = Some(
-            self.dirty_from
-                .map_or(dirty_from, |current| current.min(dirty_from)),
-        );
-    }
-
-    fn update_transform(&mut self, transform: &GlobalTransform) {
-        self.sort_z = transform.to_matrix().w_axis.z;
     }
 
     fn write_dirty_buffer(&mut self, render_device: &RenderDevice, render_queue: &RenderQueue) {
@@ -377,6 +390,17 @@ impl RenderStrokeInstance {
             self.path.write_buffer(render_device, render_queue);
         }
     }
+}
+
+fn first_changed_point(current: &[PathPoint], next: &[PathPoint]) -> Option<usize> {
+    let common_len = current.len().min(next.len());
+    for index in 0..common_len {
+        if current[index] != next[index] {
+            return Some(index);
+        }
+    }
+
+    (current.len() != next.len()).then_some(common_len)
 }
 
 impl<P: PhaseItem> RenderCommand<P> for DrawStrokeCommand {
@@ -519,12 +543,21 @@ type ChangedStrokeTransforms<'w, 's> = Query<
     (With<StrokeData>, Changed<GlobalTransform>),
 >;
 
+type OrderedStrokeRenderEntities<'w, 's> = Query<'w, 's, RenderEntity, With<StrokeData>>;
+
 fn extract_strokes(
     mut commands: Commands,
+    canvas_order: Extract<Res<CanvasOrder>>,
     changed_strokes: Extract<ChangedStrokes>,
     changed_transforms: Extract<ChangedStrokeTransforms>,
+    ordered_strokes: Extract<OrderedStrokeRenderEntities>,
+    mut render_order: ResMut<RenderCanvasOrder>,
     mut render_strokes: Query<&mut RenderStrokeInstance>,
 ) {
+    render_order.strokes = ordered_strokes
+        .iter_many(canvas_order.strokes.iter().copied())
+        .collect();
+
     for (render_entity, stroke, transform) in &changed_strokes {
         commands.entity(render_entity).insert((
             StrokeLocalUniform::from_global_transform(transform),
@@ -533,11 +566,10 @@ fn extract_strokes(
 
         if let Ok(mut instance) = render_strokes.get_mut(render_entity) {
             instance.update_from_stroke(stroke);
-            instance.update_transform(transform);
         } else {
             commands
                 .entity(render_entity)
-                .insert(RenderStrokeInstance::from_stroke(stroke, transform));
+                .insert(RenderStrokeInstance::from_stroke(stroke));
         }
     }
 
@@ -545,10 +577,6 @@ fn extract_strokes(
         commands
             .entity(render_entity)
             .insert(StrokeLocalUniform::from_global_transform(transform));
-
-        if let Ok(mut instance) = render_strokes.get_mut(render_entity) {
-            instance.update_transform(transform);
-        }
     }
 }
 
@@ -568,6 +596,7 @@ fn queue_strokes(
     mut pipelines: ResMut<SpecializedRenderPipelines<StrokePipeline>>,
     pipeline_cache: Res<PipelineCache>,
     mut transparent_render_phases: ResMut<ViewSortedRenderPhases<Transparent2d>>,
+    render_order: Res<RenderCanvasOrder>,
     views: Query<(&ExtractedView, &Msaa)>,
     strokes: Query<(Entity, &MainEntity, &RenderStrokeInstance)>,
 ) {
@@ -579,7 +608,10 @@ fn queue_strokes(
             continue;
         };
 
-        for (render_entity, main_entity, stroke) in &strokes {
+        for (order, (render_entity, main_entity, stroke)) in strokes
+            .iter_many(render_order.strokes.iter().copied())
+            .enumerate()
+        {
             if stroke.segment_count == 0 {
                 continue;
             }
@@ -594,7 +626,7 @@ fn queue_strokes(
             );
 
             transparent_phase.add(Transparent2d {
-                sort_key: FloatOrd(stroke.sort_z),
+                sort_key: FloatOrd(order as f32),
                 entity: (render_entity, *main_entity),
                 pipeline,
                 draw_function: draw_stroke,

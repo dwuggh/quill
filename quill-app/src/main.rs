@@ -150,6 +150,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
+    let app_state_for_stroke_color = app_state.clone();
+    let toolbar_for_stroke_color = toolbar_state.clone();
+    let app_weak_for_stroke_color = app_window.as_weak();
+    app_window.on_stroke_color_changed(move |color| {
+        let tool = {
+            let mut toolbar = toolbar_for_stroke_color.borrow_mut();
+            let alpha = toolbar.brush.paint.color.components[3];
+            toolbar.brush.paint.color = stroke_color(color).with_alpha(alpha);
+            toolbar.active_tool()
+        };
+        send_tool(&app_state_for_stroke_color, tool);
+        if let Some(app) = app_weak_for_stroke_color.upgrade() {
+            app.window().request_redraw();
+        }
+    });
+
+    let app_state_for_stroke_alpha = app_state.clone();
+    let toolbar_for_stroke_alpha = toolbar_state.clone();
+    let app_weak_for_stroke_alpha = app_window.as_weak();
+    app_window.on_stroke_alpha_changed(move |alpha| {
+        let tool = {
+            let mut toolbar = toolbar_for_stroke_alpha.borrow_mut();
+            toolbar.brush.paint.color = toolbar.brush.paint.color.with_alpha(alpha.clamp(0.0, 1.0));
+            toolbar.active_tool()
+        };
+        send_tool(&app_state_for_stroke_alpha, tool);
+        if let Some(app) = app_weak_for_stroke_alpha.upgrade() {
+            app.window().request_redraw();
+        }
+    });
+
     let app_state_for_tool = app_state.clone();
     let toolbar_for_tool = toolbar_state.clone();
     let app_weak_for_tool = app_window.as_weak();
@@ -275,13 +306,23 @@ impl Default for ToolbarState {
             brush: Brush {
                 tip: BrushTip::round(2.0),
                 paint: StrokePaint {
-                    color: Color::BLACK,
+                    color: stroke_color(0),
                     width: 2.0,
                     sharpness: 1.0,
                 },
             },
             eraser: EraserConfig::default(),
         }
+    }
+}
+
+/// Palette used by the stroke toolbar swatches.
+fn stroke_color(index: i32) -> Color {
+    match index {
+        1 => Color::from_rgb8(0xd1, 0x2f, 0x2f),
+        2 => Color::from_rgb8(0x24, 0x74, 0xd6),
+        3 => Color::from_rgb8(0x23, 0x80, 0x44),
+        _ => Color::BLACK,
     }
 }
 

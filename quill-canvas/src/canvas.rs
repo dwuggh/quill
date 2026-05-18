@@ -59,6 +59,11 @@ pub struct Canvas {
     render_state: Option<CanvasRenderState>,
 }
 
+#[derive(Resource, Default)]
+pub struct CanvasOrder {
+    pub strokes: Vec<Entity>,
+}
+
 impl Canvas {
     /// Create an empty canvas with default tool state and input modeler.
     pub fn new() -> Self {

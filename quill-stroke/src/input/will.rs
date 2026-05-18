@@ -387,6 +387,7 @@ impl Input {
             altitude: self.tilt_x,
             azimuth: self.tilt_y,
             t: 0.0,
+            visibility: 1,
         }
     }
 }
@@ -400,6 +401,7 @@ impl PathPoint {
             altitude: 0.0,
             azimuth: 0.0,
             t: 0.0,
+            visibility: 1,
         }
     }
 
@@ -411,6 +413,7 @@ impl PathPoint {
             altitude: self.altitude,
             azimuth: self.azimuth,
             t: self.t,
+            visibility: self.visibility,
         }
     }
 
@@ -422,6 +425,7 @@ impl PathPoint {
             altitude: 0.0,
             azimuth: 0.0,
             t: 0.0,
+            visibility: 1,
         }
     }
 
@@ -440,6 +444,7 @@ impl PathPoint {
             altitude: input.altitude,
             azimuth: input.azimuth,
             t: input.t,
+            visibility: input.visibility,
         }
     }
 
@@ -452,6 +457,7 @@ impl PathPoint {
             altitude: 0.0,
             azimuth: 0.0,
             t: 0.0,
+            visibility: 1,
         }
     }
 
@@ -463,6 +469,11 @@ impl PathPoint {
             altitude: Self::lerp_sensor(self.altitude, other.altitude, t),
             azimuth: Self::lerp_sensor(self.azimuth, other.azimuth, t),
             t: Self::lerp_value(self.t, other.t, t),
+            visibility: if self.is_visible() && other.is_visible() {
+                1
+            } else {
+                0
+            },
         }
     }
 

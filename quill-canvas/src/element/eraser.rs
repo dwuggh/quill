@@ -1,8 +1,8 @@
 //! Point-granularity stroke erasing.
 //!
-//! The eraser records the active pointer path as transient tool state. It
-//! removes covered path points from existing strokes, then splits remaining
-//! contiguous point runs into independent stroke entities.
+//! The eraser marks covered path points invisible while the pointer is down.
+//! It defers stroke splitting until the gesture ends so pointer moves stay
+//! cheap even when a long stroke is being erased.
 
 use bevy::{
     app::{Plugin, Update},
@@ -14,7 +14,7 @@ use bevy_ecs::prelude::*;
 use quill_stroke::input::{Input, PathPoint};
 
 use crate::{
-    canvas::CanvasMode,
+    canvas::{CanvasMode, CanvasOrder},
     element::{
         EraserConfig, EraserMessage, EraserShape, Tool,
         bounds::{BoundHit, BoundKey, RectBound, RoundBound, aabb_from_min_max},
@@ -44,8 +44,10 @@ impl Plugin for EraserElementPlugin {
 /// Active eraser gesture while the pointer is pressed.
 #[derive(Resource, Default)]
 pub(crate) struct ActiveEraser {
-    /// Transient path used to erase strokes during the current pointer gesture.
-    path: Option<EraserPath>,
+    /// Previous eraser sample, used to build the next swept eraser step.
+    previous: Option<Vec2>,
+    /// Strokes with newly hidden points that need final reassembly.
+    dirty_strokes: Vec<Entity>,
 }
 
 pub(crate) fn process_eraser_msg(
@@ -53,69 +55,96 @@ pub(crate) fn process_eraser_msg(
     mut messages: MessageReader<EraserMessage>,
     mode: Res<CanvasMode>,
     mut active: ResMut<ActiveEraser>,
-    strokes: Query<(Entity, &StrokeData, &RectBound, &Transform)>,
+    mut canvas_order: ResMut<CanvasOrder>,
+    mut strokes: Query<(Entity, &mut StrokeData, &RectBound, &Transform)>,
 ) {
     let Tool::Eraser(config) = mode.tool else {
-        active.path = None;
         for _ in messages.read() {}
+        finalize_dirty_strokes(&mut commands, &mut canvas_order, &mut active, &mut strokes);
+        active.reset();
         return;
     };
 
-    let mut pending_path = None;
     for msg in messages.read() {
-        if let Some(path) = active.apply_input(msg.input, config) {
-            pending_path = Some(path);
+        let update = active.apply_input(msg.input, config);
+        if let Some(step) = update.step {
+            mark_erased_points(&mut strokes, &mut active.dirty_strokes, &step);
         }
-    }
-
-    if let Some(path) = pending_path {
-        erase_with_path(&mut commands, &strokes, &path);
+        if update.finished {
+            finalize_dirty_strokes(&mut commands, &mut canvas_order, &mut active, &mut strokes);
+            active.reset();
+        }
     }
 }
 
 impl ActiveEraser {
     /// Consume one routed eraser input and return the current path update.
-    fn apply_input(&mut self, input: CanvasInput, config: EraserConfig) -> Option<EraserPath> {
+    fn apply_input(&mut self, input: CanvasInput, config: EraserConfig) -> EraserUpdate {
         match input {
-            CanvasInput::PointerEnter(_) => None,
+            CanvasInput::PointerEnter(_) => EraserUpdate::default(),
             CanvasInput::PointerLeave => {
-                self.path = None;
-                None
+                let finished = self.previous.take().is_some();
+                EraserUpdate {
+                    step: None,
+                    finished,
+                }
             }
             CanvasInput::PointerDown(input) => {
                 let position = input_to_vec2(input);
-                let path = EraserPath::new(position, config);
-                self.path = Some(path.clone());
-                Some(path)
+                self.previous = Some(position);
+                EraserUpdate {
+                    step: Some(EraserStep::new(position, position, config)),
+                    finished: false,
+                }
             }
             CanvasInput::PointerMove(input) => {
-                let path = self.path.as_mut()?;
-                path.push(input_to_vec2(input));
-                Some(path.clone())
+                let to = input_to_vec2(input);
+                let Some(from) = self.previous.replace(to) else {
+                    return EraserUpdate::default();
+                };
+                EraserUpdate {
+                    step: Some(EraserStep::new(from, to, config)),
+                    finished: false,
+                }
             }
             CanvasInput::PointerUp(input) => {
-                let mut path = self.path.take()?;
-                path.push(input_to_vec2(input));
-                Some(path)
+                let to = input_to_vec2(input);
+                let Some(from) = self.previous.take() else {
+                    return EraserUpdate::default();
+                };
+                EraserUpdate {
+                    step: Some(EraserStep::new(from, to, config)),
+                    finished: true,
+                }
             }
         }
     }
+
+    fn reset(&mut self) {
+        self.previous = None;
+        self.dirty_strokes.clear();
+    }
 }
 
-fn erase_with_path(
-    commands: &mut Commands,
-    strokes: &Query<(Entity, &StrokeData, &RectBound, &Transform)>,
-    path: &EraserPath,
+#[derive(Default)]
+struct EraserUpdate {
+    step: Option<EraserStep>,
+    finished: bool,
+}
+
+fn mark_erased_points(
+    strokes: &mut Query<(Entity, &mut StrokeData, &RectBound, &Transform)>,
+    dirty_strokes: &mut Vec<Entity>,
+    step: &EraserStep,
 ) {
-    for (entity, stroke, rect_bound, transform) in strokes {
+    for (entity, mut stroke, rect_bound, transform) in strokes.iter_mut() {
         let world_bound = rect_bound.world(transform);
-        let hits = path.intersecting_hits(&world_bound);
+        let hits = step.intersecting_hits(&world_bound);
         if hits.is_empty() {
             continue;
         }
 
-        let mut erased = vec![false; stroke.points.len()];
-        let mut has_erased = false;
+        let mut stroke_changed = false;
 
         for hit in hits {
             let range = match hit.key.clone() {
@@ -124,32 +153,56 @@ fn erase_with_path(
             };
 
             for point_index in range {
-                let point = transform_point(transform, point_to_vec2(stroke.points[point_index]));
-                if path.contains(point) {
-                    erased[point_index] = true;
-                    has_erased = true;
+                let Some(point) = stroke.points.get(point_index).copied() else {
+                    continue;
+                };
+                if !point.is_visible() {
+                    continue;
+                }
+
+                let position = transform_point(transform, point_to_vec2(point));
+                if step.contains(position) {
+                    if let Some(point) = stroke.points.get_mut(point_index) {
+                        point.set_visible(false);
+                        stroke_changed = true;
+                    }
                 }
             }
         }
 
-        if has_erased {
-            replace_erased_stroke(commands, entity, stroke, transform, &erased);
+        if stroke_changed && !dirty_strokes.contains(&entity) {
+            dirty_strokes.push(entity);
+        }
+    }
+}
+
+fn finalize_dirty_strokes(
+    commands: &mut Commands,
+    canvas_order: &mut CanvasOrder,
+    active: &mut ActiveEraser,
+    strokes: &mut Query<(Entity, &mut StrokeData, &RectBound, &Transform)>,
+) {
+    let dirty_strokes = std::mem::take(&mut active.dirty_strokes);
+    for entity in dirty_strokes {
+        if let Ok((entity, stroke, _, transform)) = strokes.get_mut(entity) {
+            replace_erased_stroke(commands, canvas_order, entity, &*stroke, transform);
         }
     }
 }
 
 fn replace_erased_stroke(
     commands: &mut Commands,
+    canvas_order: &mut CanvasOrder,
     entity: Entity,
     stroke: &StrokeData,
     transform: &Transform,
-    erased: &[bool],
 ) {
-    let fragments = surviving_fragments(&stroke.points, erased);
+    let fragments = visible_fragments(&stroke.points);
 
     match fragments.len() {
         0 => {
             commands.entity(entity).despawn();
+            canvas_order.strokes.retain(|stroke| *stroke != entity);
         }
         1 => {
             let data = StrokeData::from_finished_points(stroke.brush, fragments[0].clone());
@@ -162,27 +215,42 @@ fn replace_erased_stroke(
         }
         _ => {
             commands.entity(entity).despawn();
+            let mut new_entities = Vec::new();
             for points in fragments {
                 let data = StrokeData::from_finished_points(stroke.brush, points);
-                if let Some(bounds) = rect_bound_from_path_points(&data.points) {
-                    commands.spawn((data, bounds, *transform));
+                let new_entity = if let Some(bounds) = rect_bound_from_path_points(&data.points) {
+                    commands.spawn((data, bounds, *transform)).id()
                 } else {
-                    commands.spawn((data, *transform));
-                }
+                    commands.spawn((data, *transform)).id()
+                };
+                new_entities.push(new_entity);
             }
+            replace_ordered_stroke(canvas_order, entity, new_entities);
         }
     }
 }
 
-fn surviving_fragments(points: &[PathPoint], erased: &[bool]) -> Vec<Vec<PathPoint>> {
+fn replace_ordered_stroke(canvas_order: &mut CanvasOrder, old: Entity, new_entities: Vec<Entity>) {
+    if let Some(index) = canvas_order
+        .strokes
+        .iter()
+        .position(|entity| *entity == old)
+    {
+        canvas_order.strokes.splice(index..=index, new_entities);
+    } else {
+        canvas_order.strokes.extend(new_entities);
+    }
+}
+
+fn visible_fragments(points: &[PathPoint]) -> Vec<Vec<PathPoint>> {
     let mut fragments = Vec::new();
     let mut current = Vec::new();
 
-    for (point, erased) in points.iter().copied().zip(erased.iter().copied()) {
-        if erased {
-            push_fragment(&mut fragments, &mut current);
-        } else {
+    for point in points.iter().copied() {
+        if point.is_visible() {
             current.push(point);
+        } else {
+            push_fragment(&mut fragments, &mut current);
         }
     }
 
@@ -198,28 +266,24 @@ fn push_fragment(fragments: &mut Vec<Vec<PathPoint>>, current: &mut Vec<PathPoin
     }
 }
 
-/// Transient eraser path and its cached broad-phase bound.
+/// One swept eraser step and its cached broad-phase bound.
 #[derive(Clone, Debug)]
-struct EraserPath {
+struct EraserStep {
     config: EraserConfig,
-    points: Vec<Vec2>,
+    from: Vec2,
+    to: Vec2,
     rect_bound: RectBound,
 }
 
-impl EraserPath {
-    fn new(position: Vec2, config: EraserConfig) -> Self {
-        let points = vec![position];
-        let rect_bound = Self::bound_for_points(&points, config);
+impl EraserStep {
+    fn new(from: Vec2, to: Vec2, config: EraserConfig) -> Self {
+        let rect_bound = Self::bound_for_segment(from, to, config);
         Self {
             config,
-            points,
+            from,
+            to,
             rect_bound,
         }
-    }
-
-    fn push(&mut self, position: Vec2) {
-        self.points.push(position);
-        self.rect_bound = Self::bound_for_points(&self.points, self.config);
     }
 
     fn rect_bound(&self) -> &RectBound {
@@ -240,32 +304,23 @@ impl EraserPath {
         let mut hits = Vec::new();
         let radius = self.config.size.max(0.0);
 
-        for point in self.points.iter().copied() {
-            if let Some(point_hits) = rect_bound.intersects_round(RoundBound::new(point, radius)) {
-                hits.extend(point_hits);
-            }
+        if let Some(point_hits) = rect_bound.intersects_round(RoundBound::new(self.from, radius)) {
+            hits.extend(point_hits);
         }
 
-        for segment in self.points.windows(2) {
-            if let Some(segment_hits) = rect_bound
-                .intersects_round(RoundBound::from_segment(segment[0], segment[1], radius))
-            {
-                hits.extend(segment_hits);
-            }
+        if let Some(segment_hits) =
+            rect_bound.intersects_round(RoundBound::from_segment(self.from, self.to, radius))
+        {
+            hits.extend(segment_hits);
         }
 
         hits
     }
 
-    fn bound_for_points(points: &[Vec2], config: EraserConfig) -> RectBound {
+    fn bound_for_segment(from: Vec2, to: Vec2, config: EraserConfig) -> RectBound {
         let size = Vec2::splat(config.size.max(0.0));
-        let first = points[0];
-        let (min, max) = points
-            .iter()
-            .copied()
-            .fold((first, first), |(min, max), point| {
-                (min.min(point), max.max(point))
-            });
+        let min = from.min(to);
+        let max = from.max(to);
         RectBound::from_rect(aabb_from_min_max(min - size, max + size))
     }
 
@@ -278,30 +333,14 @@ impl EraserPath {
 
     fn contains_circle(&self, point: Vec2) -> bool {
         let radius = self.config.size.max(0.0);
-        self.points
-            .iter()
-            .copied()
-            .any(|center| RoundBound::new(center, radius).contains_point(point))
-            || self.points.windows(2).any(|segment| {
-                RoundBound::new(segment[0], radius).contains_point_swept_to(point, segment[1])
-            })
+        RoundBound::new(self.from, radius).contains_point(point)
+            || RoundBound::new(self.from, radius).contains_point_swept_to(point, self.to)
     }
 
     fn contains_square(&self, point: Vec2) -> bool {
         let size = Vec2::splat(self.config.size.max(0.0));
         let point_bound = aabb_from_min_max(point - size, point + size);
-        self.any_segment(|from, to| segment_intersects_aabb(from, to, point_bound))
-    }
-
-    fn any_segment(&self, mut contains: impl FnMut(Vec2, Vec2) -> bool) -> bool {
-        if self.points.len() == 1 {
-            let point = self.points[0];
-            return contains(point, point);
-        }
-
-        self.points
-            .windows(2)
-            .any(|segment| contains(segment[0], segment[1]))
+        segment_intersects_aabb(self.from, self.to, point_bound)
     }
 }
 
@@ -379,14 +418,15 @@ mod tests {
 
     #[test]
     fn split_erased_middle_points_into_fragments() {
-        let points = vec![
+        let mut points = vec![
             point(0.0, 0.0),
             point(1.0, 0.0),
             point(2.0, 0.0),
             point(3.0, 0.0),
             point(4.0, 0.0),
         ];
-        let fragments = surviving_fragments(&points, &[false, false, true, false, false]);
+        points[2].set_visible(false);
+        let fragments = visible_fragments(&points);
 
         assert_eq!(fragments.len(), 2);
         assert_eq!(fragments[0].len(), 2);
@@ -395,14 +435,14 @@ mod tests {
 
     #[test]
     fn circle_path_checks_distance_to_center_segments() {
-        let mut path = EraserPath::new(
+        let step = EraserStep::new(
             Vec2::new(0.0, 0.0),
+            Vec2::new(10.0, 0.0),
             EraserConfig::new(EraserShape::Circle, 1.0),
         );
-        path.push(Vec2::new(10.0, 0.0));
 
-        assert!(path.contains(Vec2::new(5.0, 0.5)));
-        assert!(!path.contains(Vec2::new(5.0, 2.0)));
+        assert!(step.contains(Vec2::new(5.0, 0.5)));
+        assert!(!step.contains(Vec2::new(5.0, 2.0)));
     }
 
     #[test]

@@ -128,6 +128,19 @@ cons:
 
 I believe the hit test is fast enough, so no need to restrict entities to pages.
 
+### layer system
+We should keep implicit drawing order, that is, new items should be placed on top.
+we can only add element order when the brush/tool changed.
+and images should be default to place at bottom. 
+- layer -100: page
+- layer -0.5: image
+- layer 0: normal strokes
+layer operations: 
+- move to top
+- move to bottom
+- increase by 1
+- decrease by 1
+
 
 # quill-app
 The frondend of quill, a real notetaking app. For now the general design is slint + bevy, slint

@@ -5,6 +5,7 @@
 
 use bevy::{
     app::{Plugin, Update},
+    math::Vec2,
     transform::components::Transform,
 };
 use bevy_ecs::message::MessageRegistry;
@@ -15,10 +16,10 @@ use quill_stroke::{
 };
 
 use crate::{
-    canvas::{CanvasErrors, CanvasMode},
+    canvas::{CanvasErrors, CanvasMode, CanvasOrder},
     element::{
         StrokeMessage, Tool,
-        bounds::{DEFAULT_BOUND_BLOCK_SIZE, RectBound},
+        bounds::{DEFAULT_BOUND_BLOCK_SIZE, RectBound, aabb_from_min_max},
     },
     error::CanvasError,
     input::{CanvasInput, GlobalInputModeler},
@@ -113,6 +114,7 @@ pub(crate) fn process_stroke_msg(
     mut messages: MessageReader<StrokeMessage>,
     mode: Res<CanvasMode>,
     mut active: ResMut<ActiveStroke>,
+    mut canvas_order: ResMut<CanvasOrder>,
     mut modeler: ResMut<GlobalInputModeler>,
     mut paths: Query<(&mut StrokeData, Option<&mut RectBound>)>,
     mut errors: ResMut<CanvasErrors>,
@@ -134,7 +136,7 @@ pub(crate) fn process_stroke_msg(
                 match modeler.modeler.enqueue(&[input], &[]) {
                     Ok(update) => {
                         let data = StrokeData::new(StrokeBrush { brush }, update);
-                        let bounds = rect_bound_from_path_points(&data.points);
+                        let bounds = active_rect_bound_from_path_points(&data.points);
                         let entity = match bounds {
                             Some(bounds) => {
                                 commands.spawn((data, bounds, Transform::IDENTITY)).id()
@@ -142,6 +144,7 @@ pub(crate) fn process_stroke_msg(
                             None => commands.spawn((data, Transform::IDENTITY)).id(),
                         };
                         active.entity = Some(entity);
+                        canvas_order.strokes.push(entity);
                     }
                     Err(error) => errors.0.push(CanvasError::from(error)),
                 }
@@ -168,8 +171,9 @@ pub(crate) fn process_stroke_msg(
                         &mut paths,
                         &mut errors,
                     );
-                    if let Ok((mut path, _)) = paths.get_mut(entity) {
+                    if let Ok((mut path, bounds)) = paths.get_mut(entity) {
                         path.finish();
+                        update_finished_bound(&mut commands, entity, &path.points, bounds);
                     }
                     modeler.modeler.reset();
                 }
@@ -189,13 +193,13 @@ fn update_active_path(
     match modeler.modeler.enqueue(&[input], &[]) {
         Ok(update) => match paths.get_mut(entity) {
             Ok((mut path, bounds)) => {
+                let updated_from = update.metadata.invalidated_from.min(path.points.len());
                 path.apply_update(update);
-                if let Some(updated) = rect_bound_from_path_points(&path.points) {
-                    if let Some(mut bounds) = bounds {
-                        *bounds = updated;
-                    } else {
-                        commands.entity(entity).insert(updated);
-                    }
+                let updated_points = &path.points[updated_from..];
+                if let Some(mut bounds) = bounds {
+                    expand_active_rect_bound(&mut bounds, updated_points);
+                } else if let Some(updated) = active_rect_bound_from_path_points(updated_points) {
+                    commands.entity(entity).insert(updated);
                 }
             }
             Err(error) => errors.0.push(CanvasError::MissingActiveStroke {
@@ -207,11 +211,48 @@ fn update_active_path(
     }
 }
 
+fn update_finished_bound(
+    commands: &mut Commands,
+    entity: Entity,
+    points: &[PathPoint],
+    bounds: Option<Mut<'_, RectBound>>,
+) {
+    if let Some(updated) = rect_bound_from_path_points(points) {
+        if let Some(mut bounds) = bounds {
+            *bounds = updated;
+        } else {
+            commands.entity(entity).insert(updated);
+        }
+    } else {
+        commands.entity(entity).remove::<RectBound>();
+    }
+}
+
 pub(crate) fn rect_bound_from_path_points(points: &[PathPoint]) -> Option<RectBound> {
     let points = points
         .iter()
         .copied()
+        .filter(|point| point.is_visible())
         .map(|point| bevy::math::Vec2::new(point.x(), point.y()))
         .collect::<Vec<_>>();
     RectBound::from_points_with_children(&points, DEFAULT_BOUND_BLOCK_SIZE)
+}
+
+fn active_rect_bound_from_path_points(points: &[PathPoint]) -> Option<RectBound> {
+    RectBound::from_points(points.iter().copied().filter_map(visible_point_to_vec2))
+}
+
+fn expand_active_rect_bound(bound: &mut RectBound, points: &[PathPoint]) {
+    bound.children = None;
+    let Some(updated) = active_rect_bound_from_path_points(points) else {
+        return;
+    };
+
+    let min = bound.rect.min.min(updated.rect.min);
+    let max = bound.rect.max.max(updated.rect.max);
+    bound.rect = aabb_from_min_max(min, max);
+}
+
+fn visible_point_to_vec2(point: PathPoint) -> Option<Vec2> {
+    point.is_visible().then(|| Vec2::new(point.x(), point.y()))
 }

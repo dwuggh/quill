@@ -14,7 +14,7 @@ use bevy::{
 use bevy_ecs::message::{MessageRegistry, message_update_system};
 use bevy_ecs::schedule::{IntoScheduleConfigs, SystemSet};
 
-use crate::canvas::{CanvasErrors, LastAddedPage, apply_canvas_commands};
+use crate::canvas::{CanvasErrors, CanvasOrder, LastAddedPage, apply_canvas_commands};
 use crate::element::{
     SelectionMessage, Tool, eraser::EraserElementPlugin, route_canvas_input,
     stroke::StrokeElementPlugin,
@@ -61,6 +61,7 @@ impl Plugin for QuillPlugin {
         MessageRegistry::register_message::<SelectionMessage>(world);
         world.init_resource::<CanvasErrors>();
         world.init_resource::<LastAddedPage>();
+        world.init_resource::<CanvasOrder>();
         world.insert_resource(crate::canvas::CanvasMode::new(Tool::default()));
 
         app.configure_sets(

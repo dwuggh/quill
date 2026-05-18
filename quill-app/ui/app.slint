@@ -1,14 +1,37 @@
 import { Button, Slider } from "std-widgets.slint";
 
+component ColorSwatch inherits Rectangle {
+    in property <color> swatch-color;
+    in property <bool> selected;
+    callback clicked;
+
+    width: 24px;
+    height: 24px;
+    background: swatch-color;
+    border-radius: 4px;
+    border-width: selected ? 3px : 1px;
+    border-color: selected ? #202020 : #c8c8c0;
+
+    TouchArea {
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
 export component AppWindow inherits Window {
     in property <image> texture <=> canvas.source;
     in-out property <int> active-tool: 0;
+    in-out property <int> stroke-color: 0;
+    in-out property <float> stroke-alpha: 1;
     in-out property <float> round-tip-radius: 2;
     in-out property <float> eraser-size: 12;
     in-out property <int> eraser-shape: 0;
     out property <length> requested-texture-width: canvas.width;
     out property <length> requested-texture-height: canvas.height;
     callback active-tool-changed(int);
+    callback stroke-color-changed(int);
+    callback stroke-alpha-changed(float);
     callback round-tip-radius-changed(float);
     callback eraser-size-changed(float);
     callback eraser-shape-changed(int);
@@ -84,6 +107,72 @@ export component AppWindow inherits Window {
 
                 Text {
                     text: Math.round(root.round-tip-radius * 10) / 10;
+                    vertical-alignment: center;
+                    color: #303030;
+                }
+
+                Text {
+                    text: "Color";
+                    vertical-alignment: center;
+                    color: #505050;
+                }
+
+                ColorSwatch {
+                    swatch-color: #202020;
+                    selected: root.stroke-color == 0;
+                    clicked => {
+                        root.stroke-color = 0;
+                        root.stroke-color-changed(0);
+                    }
+                }
+
+                ColorSwatch {
+                    swatch-color: #d12f2f;
+                    selected: root.stroke-color == 1;
+                    clicked => {
+                        root.stroke-color = 1;
+                        root.stroke-color-changed(1);
+                    }
+                }
+
+                ColorSwatch {
+                    swatch-color: #2474d6;
+                    selected: root.stroke-color == 2;
+                    clicked => {
+                        root.stroke-color = 2;
+                        root.stroke-color-changed(2);
+                    }
+                }
+
+                ColorSwatch {
+                    swatch-color: #238044;
+                    selected: root.stroke-color == 3;
+                    clicked => {
+                        root.stroke-color = 3;
+                        root.stroke-color-changed(3);
+                    }
+                }
+
+                Text {
+                    text: "Alpha";
+                    vertical-alignment: center;
+                    color: #505050;
+                }
+
+                Slider {
+                    width: 120px;
+                    minimum: 0.05;
+                    maximum: 1;
+                    step: 0.05;
+                    value: root.stroke-alpha;
+                    changed(value) => {
+                        root.stroke-alpha = value;
+                        root.stroke-alpha-changed(value);
+                    }
+                }
+
+                Text {
+                    text: Math.round(root.stroke-alpha * 100) + "%";
                     vertical-alignment: center;
                     color: #303030;
                 }
