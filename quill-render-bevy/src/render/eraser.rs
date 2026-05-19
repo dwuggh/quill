@@ -38,14 +38,13 @@ use bevy_ecs::{
         lifetimeless::{Read, SRes},
     },
 };
-use quill_stroke::input::Input;
-
-use crate::{
+use quill_canvas::{
     canvas::CanvasMode,
     element::{EraserConfig, EraserShape, Tool},
     input::CanvasInput,
-    plugin::QuillUpdateSet,
+    runtime::QuillUpdateSet,
 };
+use quill_stroke::input::Input;
 
 const CIRCLE_SHAPE: u32 = 0;
 const SQUARE_SHAPE: u32 = 1;

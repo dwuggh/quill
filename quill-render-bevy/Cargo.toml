@@ -1,0 +1,15 @@
+[package]
+name = "quill-render-bevy"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+async-channel.workspace = true
+bevy.workspace = true
+bevy_ecs.workspace = true
+futures-lite.workspace = true
+peniko.workspace = true
+quill-canvas = { path = "../quill-canvas" }
+quill_stroke = { path = "../quill-stroke" }
+spin_on.workspace = true
+wgpu.workspace = true

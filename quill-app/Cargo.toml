@@ -9,7 +9,8 @@ name = "quill"
 path = "src/main.rs"
 
 [dependencies]
-quill-canvas = { path = "../quill-canvas", features = ["bevy"] }
+quill-canvas = { path = "../quill-canvas" }
+quill-render-bevy = { path = "../quill-render-bevy" }
 quill_stroke = { path = "../quill-stroke" }
 peniko.workspace = true
 slint.workspace = true

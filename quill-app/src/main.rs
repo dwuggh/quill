@@ -2,10 +2,10 @@ use std::{cell::RefCell, rc::Rc, time::Instant};
 
 use peniko::Color;
 use quill_canvas::{
-    Texture,
     message::CanvasMessage,
-    prelude::{CanvasInput, CanvasRenderer, EraserConfig, EraserShape, Tool},
+    prelude::{CanvasInput, EraserConfig, EraserShape, Tool},
 };
+use quill_render_bevy::{CanvasRenderer, Texture};
 use quill_stroke::{
     brush::{Brush, BrushTip, StrokePaint},
     input::Input as StrokeInput,

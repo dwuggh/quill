@@ -3,13 +3,10 @@
 //! The input modeler is global while a stroke is active. Each completed or
 //! active stroke entity stores the brush snapshot and the latest modeled path.
 
-use bevy::{
-    app::{Plugin, Update},
-    math::Vec2,
-    transform::components::Transform,
-};
 use bevy_ecs::message::MessageRegistry;
 use bevy_ecs::prelude::*;
+use bevy_ecs::schedule::{IntoScheduleConfigs, Schedule};
+use peniko::kurbo::Point;
 use quill_stroke::{
     brush::Brush,
     input::{Input, ModelUpdate, ModelUpdateMeta, PathPoint},
@@ -19,11 +16,12 @@ use crate::{
     canvas::{CanvasErrors, CanvasMode, CanvasOrder},
     element::{
         StrokeMessage, Tool,
-        bounds::{DEFAULT_BOUND_BLOCK_SIZE, RectBound, aabb_from_min_max},
+        bounds::{DEFAULT_BOUND_BLOCK_SIZE, RectBound},
     },
     error::CanvasError,
+    geom::CanvasTransform,
     input::{CanvasInput, GlobalInputModeler},
-    plugin::QuillUpdateSet,
+    runtime::QuillUpdateSet,
 };
 
 /// Brush metadata attached to a stroke entity.
@@ -93,20 +91,14 @@ pub struct ActiveStroke {
     pub entity: Option<Entity>,
 }
 
-pub(crate) struct StrokeElementPlugin;
+pub(crate) fn register_stroke_systems(world: &mut World) {
+    MessageRegistry::register_message::<StrokeMessage>(world);
+    world.init_resource::<ActiveStroke>();
+    world.insert_resource(GlobalInputModeler::default());
+}
 
-impl Plugin for StrokeElementPlugin {
-    fn build(&self, app: &mut bevy::app::App) {
-        let world = app.world_mut();
-        MessageRegistry::register_message::<StrokeMessage>(world);
-        world.init_resource::<ActiveStroke>();
-        world.insert_resource(GlobalInputModeler::default());
-
-        app.add_systems(
-            Update,
-            process_stroke_msg.in_set(QuillUpdateSet::ToolMessages),
-        );
-    }
+pub(crate) fn install_stroke_systems(schedule: &mut Schedule) {
+    schedule.add_systems(process_stroke_msg.in_set(QuillUpdateSet::ToolMessages));
 }
 
 pub(crate) fn process_stroke_msg(
@@ -138,10 +130,10 @@ pub(crate) fn process_stroke_msg(
                         let data = StrokeData::new(StrokeBrush { brush }, update);
                         let bounds = active_rect_bound_from_path_points(&data.points);
                         let entity = match bounds {
-                            Some(bounds) => {
-                                commands.spawn((data, bounds, Transform::IDENTITY)).id()
-                            }
-                            None => commands.spawn((data, Transform::IDENTITY)).id(),
+                            Some(bounds) => commands
+                                .spawn((data, bounds, CanvasTransform::IDENTITY))
+                                .id(),
+                            None => commands.spawn((data, CanvasTransform::IDENTITY)).id(),
                         };
                         active.entity = Some(entity);
                         canvas_order.strokes.push(entity);
@@ -233,7 +225,7 @@ pub(crate) fn rect_bound_from_path_points(points: &[PathPoint]) -> Option<RectBo
         .iter()
         .copied()
         .filter(|point| point.is_visible())
-        .map(|point| bevy::math::Vec2::new(point.x(), point.y()))
+        .map(point_to_canvas_point)
         .collect::<Vec<_>>();
     RectBound::from_points_with_children(&points, DEFAULT_BOUND_BLOCK_SIZE)
 }
@@ -248,11 +240,13 @@ fn expand_active_rect_bound(bound: &mut RectBound, points: &[PathPoint]) {
         return;
     };
 
-    let min = bound.rect.min.min(updated.rect.min);
-    let max = bound.rect.max.max(updated.rect.max);
-    bound.rect = aabb_from_min_max(min, max);
+    bound.rect = bound.rect.union(updated.rect);
 }
 
-fn visible_point_to_vec2(point: PathPoint) -> Option<Vec2> {
-    point.is_visible().then(|| Vec2::new(point.x(), point.y()))
+fn visible_point_to_vec2(point: PathPoint) -> Option<Point> {
+    point.is_visible().then(|| point_to_canvas_point(point))
+}
+
+fn point_to_canvas_point(point: PathPoint) -> Point {
+    Point::new(f64::from(point.x()), f64::from(point.y()))
 }

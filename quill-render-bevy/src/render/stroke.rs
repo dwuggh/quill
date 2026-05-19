@@ -28,7 +28,6 @@ use bevy::{
         view::{ExtractedView, Msaa, ViewUniform, ViewUniformOffset, ViewUniforms},
     },
     shader::Shader,
-    transform::components::GlobalTransform,
 };
 use bevy_ecs::{
     query::{Changed, ROQueryItem, With},
@@ -38,10 +37,12 @@ use bevy_ecs::{
         lifetimeless::{Read, SRes},
     },
 };
+use quill_canvas::{
+    canvas::CanvasOrder,
+    element::stroke::{StrokeData, StrokeStatus},
+    geom::CanvasTransform,
+};
 use quill_stroke::{brush::BrushTip, gpu::ROUND_SHADER, input::PathPoint};
-
-use crate::canvas::CanvasOrder;
-use crate::element::stroke::{StrokeData, StrokeStatus};
 
 #[derive(Clone, Copy, Component, Debug, ShaderType)]
 struct StrokeParamsUniform {
@@ -83,9 +84,13 @@ struct StrokeLocalUniform {
 }
 
 impl StrokeLocalUniform {
-    fn from_global_transform(transform: &GlobalTransform) -> Self {
+    fn from_canvas_transform(transform: CanvasTransform) -> Self {
+        let [a, b, c, d, e, f] = transform.affine.as_coeffs();
         Self {
-            world_from_local: transform.to_matrix(),
+            world_from_local: Mat4::from_cols_array(&[
+                a as f32, b as f32, 0.0, 0.0, c as f32, d as f32, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0,
+                e as f32, f as f32, 0.0, 1.0,
+            ]),
         }
     }
 }
@@ -532,15 +537,15 @@ fn prepare_stroke_bind_group(
 type ChangedStrokes<'w, 's> = Query<
     'w,
     's,
-    (RenderEntity, &'static StrokeData, &'static GlobalTransform),
+    (RenderEntity, &'static StrokeData, &'static CanvasTransform),
     Changed<StrokeData>,
 >;
 
 type ChangedStrokeTransforms<'w, 's> = Query<
     'w,
     's,
-    (RenderEntity, &'static GlobalTransform),
-    (With<StrokeData>, Changed<GlobalTransform>),
+    (RenderEntity, &'static CanvasTransform),
+    (With<StrokeData>, Changed<CanvasTransform>),
 >;
 
 type OrderedStrokeRenderEntities<'w, 's> = Query<'w, 's, RenderEntity, With<StrokeData>>;
@@ -560,7 +565,7 @@ fn extract_strokes(
 
     for (render_entity, stroke, transform) in &changed_strokes {
         commands.entity(render_entity).insert((
-            StrokeLocalUniform::from_global_transform(transform),
+            StrokeLocalUniform::from_canvas_transform(*transform),
             StrokeParamsUniform::from_stroke(stroke),
         ));
 
@@ -576,7 +581,7 @@ fn extract_strokes(
     for (render_entity, transform) in &changed_transforms {
         commands
             .entity(render_entity)
-            .insert(StrokeLocalUniform::from_global_transform(transform));
+            .insert(StrokeLocalUniform::from_canvas_transform(*transform));
     }
 }
 

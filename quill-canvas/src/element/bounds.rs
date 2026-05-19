@@ -5,15 +5,11 @@
 
 use std::ops::Range;
 
-use bevy::{
-    math::{
-        Vec2, Vec3,
-        bounding::{Aabb2d, IntersectsVolume},
-    },
-    transform::components::Transform,
-};
 use bevy_ecs::prelude::*;
+use peniko::kurbo::{Point, Rect};
 use smallvec::{SmallVec, smallvec};
+
+use crate::geom::CanvasTransform;
 
 /// Default child block size used by point-like element bounds.
 pub const DEFAULT_BOUND_BLOCK_SIZE: usize = 64;
@@ -22,7 +18,7 @@ pub const DEFAULT_BOUND_BLOCK_SIZE: usize = 64;
 #[derive(Component, Clone, Debug)]
 pub struct RectBound {
     /// Element-local broad-phase rectangle.
-    pub rect: Aabb2d,
+    pub rect: Rect,
     /// Optional element-local sub-rectangles for inner item acceleration.
     pub children: Option<SmallVec<[SubRectBound; 8]>>,
 }
@@ -31,9 +27,9 @@ pub struct RectBound {
 #[derive(Component, Clone, Copy, Debug)]
 pub struct RoundBound {
     /// Bound center in the same coordinate space as the tested rectangle.
-    pub center: Vec2,
+    pub center: Point,
     /// Bound radius in the same coordinate space as the tested rectangle.
-    pub radius: f32,
+    pub radius: f64,
 }
 
 /// A child rectangle inside a larger element bound.
@@ -42,7 +38,7 @@ pub struct SubRectBound {
     /// Owner-defined identity for the content covered by this child.
     pub key: BoundKey,
     /// Child rectangle in the same coordinate space as the parent.
-    pub rect: Aabb2d,
+    pub rect: Rect,
 }
 
 /// Owner-defined identity for a bound hit.
@@ -58,7 +54,7 @@ pub struct BoundHit {
     /// Child key when the hit came from a sub-bound, or `None` for the parent.
     pub key: Option<BoundKey>,
     /// Intersected rectangle in the query coordinate space.
-    pub rect: Aabb2d,
+    pub rect: Rect,
 }
 
 /// Small hit list returned by bounds intersection queries.
@@ -66,7 +62,7 @@ pub type BoundHits = SmallVec<[BoundHit; 8]>;
 
 impl RectBound {
     /// Create a rectangular bound without sub-bounds.
-    pub fn from_rect(rect: Aabb2d) -> Self {
+    pub fn from_rect(rect: Rect) -> Self {
         Self {
             rect,
             children: None,
@@ -74,12 +70,12 @@ impl RectBound {
     }
 
     /// Create a rectangular bound from points.
-    pub fn from_points(points: impl IntoIterator<Item = Vec2>) -> Option<Self> {
+    pub fn from_points(points: impl IntoIterator<Item = Point>) -> Option<Self> {
         points_bounds(points).map(Self::from_rect)
     }
 
     /// Create a rectangular bound with range-keyed child rectangles.
-    pub fn from_points_with_children(points: &[Vec2], block_size: usize) -> Option<Self> {
+    pub fn from_points_with_children(points: &[Point], block_size: usize) -> Option<Self> {
         let rect = points_bounds(points.iter().copied())?;
         let children = if block_size == 0 {
             None
@@ -104,19 +100,19 @@ impl RectBound {
     }
 
     /// Return a copy of this bound transformed into world coordinates.
-    pub fn world(&self, transform: &Transform) -> Self {
+    pub fn world(&self, transform: CanvasTransform) -> Self {
         let children = self.children.as_ref().map(|children| {
             children
                 .iter()
                 .map(|child| SubRectBound {
                     key: child.key.clone(),
-                    rect: transform_aabb(transform, child.rect),
+                    rect: transform.transform_rect(child.rect),
                 })
                 .collect()
         });
 
         Self {
-            rect: transform_aabb(transform, self.rect),
+            rect: transform.transform_rect(self.rect),
             children,
         }
     }
@@ -131,24 +127,21 @@ impl RectBound {
     }
 
     /// Return hits for this rectangle against another rectangle.
-    pub fn intersects_rect(&self, rect: Aabb2d) -> Option<BoundHits> {
-        if !self.rect.intersects(&rect) {
+    pub fn intersects_rect(&self, rect: Rect) -> Option<BoundHits> {
+        if !rects_intersect(self.rect, rect) {
             return None;
         }
 
-        self.intersecting_children(|child| child.intersects(&rect))
+        self.intersecting_children(|child| rects_intersect(child, rect))
     }
 
     /// Convenience API for callers that only need intersected rectangles.
-    pub fn intersecting_aabbs(&self, rect: Aabb2d) -> Option<SmallVec<[Aabb2d; 8]>> {
+    pub fn intersecting_rects(&self, rect: Rect) -> Option<SmallVec<[Rect; 8]>> {
         let hits = self.intersects_rect(rect)?;
         Some(hits.into_iter().map(|hit| hit.rect).collect())
     }
 
-    fn intersecting_children(
-        &self,
-        mut intersects: impl FnMut(Aabb2d) -> bool,
-    ) -> Option<BoundHits> {
+    fn intersecting_children(&self, mut intersects: impl FnMut(Rect) -> bool) -> Option<BoundHits> {
         let Some(children) = self.children.as_ref() else {
             return Some(smallvec![BoundHit {
                 key: None,
@@ -171,7 +164,7 @@ impl RectBound {
 
 impl RoundBound {
     /// Create a round bound with a non-negative radius.
-    pub fn new(center: Vec2, radius: f32) -> Self {
+    pub fn new(center: Point, radius: f64) -> Self {
         Self {
             center,
             radius: radius.max(0.0),
@@ -179,79 +172,72 @@ impl RoundBound {
     }
 
     /// Create a conservative round bound for a circle swept along a segment.
-    pub fn from_segment(from: Vec2, to: Vec2, radius: f32) -> Self {
-        let center = (from + to) * 0.5;
+    pub fn from_segment(from: Point, to: Point, radius: f64) -> Self {
+        let center = Point::new((from.x + to.x) * 0.5, (from.y + to.y) * 0.5);
         Self::new(center, radius.max(0.0) + from.distance(to) * 0.5)
     }
 
     /// Return an enclosing rectangle for this round bound.
-    pub fn aabb(self) -> Aabb2d {
-        Aabb2d::new(self.center, Vec2::splat(self.radius))
+    pub fn rect(self) -> Rect {
+        Rect::new(
+            self.center.x - self.radius,
+            self.center.y - self.radius,
+            self.center.x + self.radius,
+            self.center.y + self.radius,
+        )
     }
 
     /// Test whether this round bound contains a point.
-    pub fn contains_point(self, point: Vec2) -> bool {
-        point.distance_squared(self.center) <= self.radius * self.radius
+    pub fn contains_point(self, point: Point) -> bool {
+        distance_squared(point, self.center) <= self.radius * self.radius
     }
 
     /// Test whether this round bound contains a point while swept to `to`.
-    pub fn contains_point_swept_to(self, point: Vec2, to: Vec2) -> bool {
+    pub fn contains_point_swept_to(self, point: Point, to: Point) -> bool {
         point_distance_squared_to_segment(point, self.center, to) <= self.radius * self.radius
     }
 
     /// Test whether this round bound intersects a rectangle.
-    pub fn intersects_rect(self, rect: Aabb2d) -> bool {
-        let closest = self.center.clamp(rect.min, rect.max);
+    pub fn intersects_rect(self, rect: Rect) -> bool {
+        let closest = Point::new(
+            self.center.x.clamp(rect.x0, rect.x1),
+            self.center.y.clamp(rect.y0, rect.y1),
+        );
         self.contains_point(closest)
     }
 }
 
 /// Create an AABB from inclusive minimum and maximum corners.
-pub fn aabb_from_min_max(min: Vec2, max: Vec2) -> Aabb2d {
-    Aabb2d::new((min + max) * 0.5, (max - min) * 0.5)
+pub fn rect_from_min_max(min: Point, max: Point) -> Rect {
+    Rect::new(min.x, min.y, max.x, max.y)
 }
 
-/// Transform a local rectangle into a conservative world rectangle.
-pub fn transform_aabb(transform: &Transform, bounds: Aabb2d) -> Aabb2d {
-    let corners = [
-        Vec2::new(bounds.min.x, bounds.min.y),
-        Vec2::new(bounds.min.x, bounds.max.y),
-        Vec2::new(bounds.max.x, bounds.min.y),
-        Vec2::new(bounds.max.x, bounds.max.y),
-    ];
-    let first = transform_point(transform, corners[0]);
-    let (min, max) = corners[1..]
-        .iter()
-        .copied()
-        .map(|point| transform_point(transform, point))
-        .fold((first, first), |(min, max), point| {
-            (min.min(point), max.max(point))
-        });
-    aabb_from_min_max(min, max)
-}
-
-fn points_bounds(points: impl IntoIterator<Item = Vec2>) -> Option<Aabb2d> {
+fn points_bounds(points: impl IntoIterator<Item = Point>) -> Option<Rect> {
     let mut iter = points.into_iter();
     let first = iter.next()?;
-    let (min, max) = iter.fold((first, first), |(min, max), point| {
-        (min.min(point), max.max(point))
-    });
-    Some(aabb_from_min_max(min, max))
+    Some(iter.fold(Rect::from_points(first, first), |rect, point| {
+        rect.union_pt(point)
+    }))
 }
 
-fn point_distance_squared_to_segment(point: Vec2, from: Vec2, to: Vec2) -> f32 {
+fn point_distance_squared_to_segment(point: Point, from: Point, to: Point) -> f64 {
     let segment = to - from;
-    let length_squared = segment.length_squared();
-    if length_squared <= f32::EPSILON {
-        return point.distance_squared(from);
+    let length_squared = segment.hypot2();
+    if length_squared <= f64::EPSILON {
+        return distance_squared(point, from);
     }
 
-    let t = ((point - from).dot(segment) / length_squared).clamp(0.0, 1.0);
-    point.distance_squared(from + segment * t)
+    let delta = point - from;
+    let t = ((delta.x * segment.x + delta.y * segment.y) / length_squared).clamp(0.0, 1.0);
+    distance_squared(point, from + segment * t)
 }
 
-fn transform_point(transform: &Transform, point: Vec2) -> Vec2 {
-    transform
-        .transform_point(Vec3::new(point.x, point.y, 0.0))
-        .truncate()
+fn distance_squared(a: Point, b: Point) -> f64 {
+    let dx = a.x - b.x;
+    let dy = a.y - b.y;
+    dx * dx + dy * dy
+}
+
+fn rects_intersect(a: Rect, b: Rect) -> bool {
+    a.x0 <= b.x1 && a.x1 >= b.x0 && a.y0 <= b.y1 && a.y1 >= b.y0
 }

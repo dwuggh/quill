@@ -1,36 +1,34 @@
 //! Scene-level canvas model for Quill.
 //!
 //! This crate owns the ECS representation of pages, tools, input routing, and
-//! modeled strokes. Rendering code may prepare GPU stroke caches here, but the
-//! host app still owns windows, cameras, render targets, and final draw passes.
+//! modeled strokes. Renderer crates can mount this scene model into their own
+//! host app without pulling render backends into the core canvas crate.
 
 pub mod canvas;
 pub mod element;
 pub mod eraser;
 pub mod error;
+pub mod geom;
 pub mod input;
 pub mod message;
-#[cfg(feature = "bevy")]
-pub mod plugin;
-pub mod render;
-
-pub use bevy::render::render_resource::Texture;
+pub mod runtime;
 
 /// Common imports for app crates.
 pub mod prelude {
     pub use crate::{
-        Texture,
+        canvas::Canvas,
         canvas::CanvasMode,
-        canvas::{Canvas, CanvasRenderer},
         element::bounds::{BoundHit, BoundHits, BoundKey, RectBound, RoundBound, SubRectBound},
         element::page::{Page, PageConfig},
+        element::selection::{
+            Selected, SelectionGesture, SelectionMode, SelectionOp, SelectionState, SelectionTool,
+        },
         element::stroke::{ActiveStroke, StrokeBrush, StrokeData},
         element::{EraserConfig, EraserShape, Tool},
         error::CanvasError,
+        geom::CanvasTransform,
         input::{CanvasInput, GlobalInputModeler},
         message::CanvasMessage,
+        runtime::{CanvasRuntime, QuillUpdateSet},
     };
-
-    #[cfg(feature = "bevy")]
-    pub use crate::plugin::QuillPlugin;
 }

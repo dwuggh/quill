@@ -13,7 +13,10 @@ use crate::{canvas::CanvasMode, input::CanvasInput};
 pub mod bounds;
 pub mod eraser;
 pub mod page;
+pub mod selection;
 pub mod stroke;
+
+pub use selection::{SelectionMode, SelectionOp, SelectionTool};
 
 /// Active tool used when pointer input creates or edits scene content.
 #[derive(Clone, Copy, Debug)]
@@ -22,7 +25,7 @@ pub enum Tool {
     Stroke(Brush),
     /// Remove path points covered by the eraser footprint.
     Eraser(EraserConfig),
-    /// Placeholder for future selection/edit behavior.
+    /// Select existing canvas elements.
     Selection(SelectionTool),
     // Shape(ShapeTool),
     // Marker(MarkerTool),
@@ -73,15 +76,6 @@ impl Default for Tool {
             },
         })
     }
-}
-
-/// Placeholder state for future selection/edit behavior.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct SelectionTool {}
-
-pub enum SelectionMode {
-    Pixel,
-    Item,
 }
 
 // pub struct PageTool {}

@@ -3,20 +3,9 @@ name = "quill-canvas"
 version.workspace = true
 edition.workspace = true
 
-[features]
-bevy = []
-default = ["bevy"]
-
 [dependencies]
-# bevy_app = { version = "0.18.1", optional = true }
-async-channel.workspace = true
-bevy.workspace = true
-bevy_ecs = "0.18.1"
-futures-lite.workspace = true
+bevy_ecs.workspace = true
 peniko.workspace = true
 smallvec.workspace = true
-spin_on.workspace = true
 thiserror.workspace = true
-tracing.workspace = true
-wgpu.workspace = true
 quill_stroke = { path = "../quill-stroke" }
