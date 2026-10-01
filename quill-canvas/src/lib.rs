@@ -27,7 +27,8 @@ pub mod prelude {
         element::image::ImageElement,
         element::page::{Page, PageBackground, PageBackgroundItem, PageConfig},
         element::selection::{
-            Selected, SelectionGesture, SelectionMode, SelectionOp, SelectionState, SelectionTool,
+            Selected, SelectionArea, SelectionAreaShape, SelectionGesture, SelectionMode,
+            SelectionOp, SelectionState, SelectionTool,
         },
         element::stroke::{ActiveStroke, StrokeBrush, StrokeData},
         element::text::{CanvasGlyph, CanvasNormalizedCoord, TextElement},

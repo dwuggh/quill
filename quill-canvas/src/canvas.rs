@@ -247,18 +247,21 @@ mod tests {
     use bevy_ecs::hierarchy::{ChildOf, Children};
     use peniko::{
         Brush, Fill, Style,
-        kurbo::{Affine, Rect, Size},
+        kurbo::{Affine, Point, Rect, Size},
     };
     use quill_stroke::input::{Input, InputModeler, PathPoint, WillInputModeler};
 
     use super::*;
     use crate::{
         asset::{CanvasFont, CanvasImage},
-        document::DocumentRootEntity,
+        document::{DocumentRootEntity, root_from_entity},
         element::{
             EraserConfig, EraserMode, EraserShape,
             image::ImageElement,
-            selection::{SelectionOp, SelectionState},
+            selection::{
+                SelectionArea, SelectionAreaShape, SelectionMode, SelectionOp, SelectionState,
+                SelectionTool,
+            },
             stroke::{StrokeBrush, StrokeData, rect_bound_from_path_points},
             text::{CanvasGlyph, TextElement},
         },
@@ -351,6 +354,131 @@ mod tests {
 
         assert!((stroke.points[0].x() - 10.0).abs() < 0.001);
         assert!((stroke.points[0].y() - 20.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn rect_selection_creates_dashed_area_entity() {
+        let mut canvas = Canvas::new();
+        let root = canvas.world().resource::<DocumentRootEntity>().0;
+        let stroke = spawn_stroke(&mut canvas, root, &[(10.0, 10.0), (20.0, 12.0)]);
+        canvas
+            .change_tool(Tool::Selection(SelectionTool {
+                mode: SelectionMode::Rect,
+                ..Default::default()
+            }))
+            .unwrap();
+
+        canvas
+            .input(CanvasInput::PointerDown(
+                Input::new(0.0, 0.0, 0.0).with_pressure(1.0),
+            ))
+            .unwrap();
+        canvas
+            .input(CanvasInput::PointerMove(
+                Input::new(30.0, 30.0, 1.0).with_pressure(1.0),
+            ))
+            .unwrap();
+        canvas
+            .input(CanvasInput::PointerUp(
+                Input::new(30.0, 30.0, 2.0).with_pressure(1.0),
+            ))
+            .unwrap();
+
+        let world = canvas.world();
+        let selection = world.resource::<SelectionState>();
+        assert!(selection.contains(stroke));
+        let area = current_selection_area(world);
+        assert_eq!(area.owner, root);
+        assert!(
+            matches!(area.shape, SelectionAreaShape::Rect(rect) if rect == Rect::new(0.0, 0.0, 30.0, 30.0))
+        );
+    }
+
+    #[test]
+    fn lasso_selection_stores_input_path_as_area() {
+        let mut canvas = Canvas::new();
+        let root = canvas.world().resource::<DocumentRootEntity>().0;
+        let stroke = spawn_stroke(&mut canvas, root, &[(10.0, 10.0), (20.0, 12.0)]);
+        canvas
+            .change_tool(Tool::Selection(SelectionTool {
+                mode: SelectionMode::Lasso,
+                ..Default::default()
+            }))
+            .unwrap();
+
+        for input in [
+            CanvasInput::PointerDown(Input::new(0.0, 0.0, 0.0).with_pressure(1.0)),
+            CanvasInput::PointerMove(Input::new(30.0, 0.0, 1.0).with_pressure(1.0)),
+            CanvasInput::PointerMove(Input::new(30.0, 30.0, 2.0).with_pressure(1.0)),
+            CanvasInput::PointerUp(Input::new(0.0, 30.0, 3.0).with_pressure(1.0)),
+        ] {
+            canvas.input(input).unwrap();
+        }
+
+        let world = canvas.world();
+        assert!(world.resource::<SelectionState>().contains(stroke));
+        let area = current_selection_area(world);
+        assert!(
+            matches!(&area.shape, SelectionAreaShape::Lasso(points) if points.len() == 5 && points.first() == points.last())
+        );
+    }
+
+    #[test]
+    fn dragging_selection_area_moves_and_reparents_selected_elements() {
+        let mut canvas = Canvas::new();
+        let first = canvas.add_page(PageConfig::default()).unwrap();
+        let second = canvas
+            .add_page_to(
+                None,
+                PageConfig::default(),
+                CanvasTransform {
+                    affine: Affine::translate((200.0, 0.0)),
+                },
+            )
+            .unwrap();
+        let stroke = spawn_stroke(&mut canvas, first, &[(10.0, 10.0), (20.0, 12.0)]);
+        canvas
+            .change_tool(Tool::Selection(SelectionTool::default()))
+            .unwrap();
+
+        canvas
+            .input(CanvasInput::PointerDown(
+                Input::new(10.0, 10.0, 0.0).with_pressure(1.0),
+            ))
+            .unwrap();
+        canvas
+            .input(CanvasInput::PointerUp(
+                Input::new(10.0, 10.0, 1.0).with_pressure(1.0),
+            ))
+            .unwrap();
+
+        canvas
+            .input(CanvasInput::PointerDown(
+                Input::new(10.0, 10.0, 2.0).with_pressure(1.0),
+            ))
+            .unwrap();
+        canvas
+            .input(CanvasInput::PointerMove(
+                Input::new(210.0, 10.0, 3.0).with_pressure(1.0),
+            ))
+            .unwrap();
+        canvas
+            .input(CanvasInput::PointerUp(
+                Input::new(210.0, 10.0, 4.0).with_pressure(1.0),
+            ))
+            .unwrap();
+
+        let world = canvas.world();
+        assert_eq!(world.get::<ChildOf>(stroke).unwrap().0, second);
+        let root_from_stroke = root_from_entity(world, stroke).unwrap();
+        let moved_origin = root_from_stroke * Point::ZERO;
+        assert!((moved_origin.x - 200.0).abs() < 0.001);
+        assert!(world.resource::<SelectionState>().contains(stroke));
+        assert_eq!(current_selection_area(world).owner, second);
+        assert!(matches!(
+            current_selection_area(world).shape,
+            SelectionAreaShape::ItemRect(rect) if rect.x0 >= 210.0
+        ));
     }
 
     #[test]
@@ -462,6 +590,63 @@ mod tests {
     }
 
     #[test]
+    fn pixel_eraser_splits_stroke_entities_and_recomputes_bounds() {
+        let mut canvas = Canvas::new();
+        let root = canvas.world().resource::<DocumentRootEntity>().0;
+        let stroke = spawn_stroke(
+            &mut canvas,
+            root,
+            &[(0.0, 0.0), (4.0, 0.0), (6.0, 0.0), (10.0, 0.0)],
+        );
+
+        canvas
+            .change_tool(Tool::Eraser(EraserConfig::new(EraserShape::Circle, 0.5)))
+            .unwrap();
+        canvas
+            .input(CanvasInput::PointerDown(
+                Input::new(5.0, -2.0, 0.0).with_pressure(1.0),
+            ))
+            .unwrap();
+        canvas
+            .input(CanvasInput::PointerUp(
+                Input::new(5.0, 2.0, 1.0).with_pressure(1.0),
+            ))
+            .unwrap();
+
+        let world = canvas.world();
+        assert!(world.get::<StrokeData>(stroke).is_none());
+        let fragments = world
+            .get::<Children>(root)
+            .unwrap()
+            .iter()
+            .filter(|entity| world.get::<StrokeData>(*entity).is_some())
+            .collect::<Vec<_>>();
+        assert_eq!(fragments.len(), 2);
+
+        let first_bound = world.get::<RectBound>(fragments[0]).unwrap().rect;
+        let second_bound = world.get::<RectBound>(fragments[1]).unwrap().rect;
+        assert!(first_bound.x1 <= 4.51);
+        assert!(second_bound.x0 >= 5.49);
+
+        let mut selection_tool = SelectionTool::default();
+        selection_tool.hit_radius = 0.1;
+        canvas.change_tool(Tool::Selection(selection_tool)).unwrap();
+        canvas
+            .input(CanvasInput::PointerDown(
+                Input::new(5.0, 0.0, 2.0).with_pressure(1.0),
+            ))
+            .unwrap();
+        canvas
+            .input(CanvasInput::PointerUp(
+                Input::new(5.0, 0.0, 3.0).with_pressure(1.0),
+            ))
+            .unwrap();
+
+        let selection = canvas.world().resource::<SelectionState>();
+        assert!(selection.selected().is_empty());
+    }
+
+    #[test]
     fn eraser_replaces_selected_stroke_with_selected_fragments() {
         let mut canvas = Canvas::new();
         let root = canvas.world().resource::<DocumentRootEntity>().0;
@@ -564,6 +749,11 @@ mod tests {
             .world_mut()
             .spawn((data, bounds, CanvasTransform::IDENTITY, ChildOf(owner)))
             .id()
+    }
+
+    fn current_selection_area(world: &World) -> &SelectionArea {
+        let entity = world.resource::<SelectionState>().area_entity().unwrap();
+        world.get::<SelectionArea>(entity).unwrap()
     }
 
     fn modeled_point(x: f32, y: f32) -> PathPoint {
