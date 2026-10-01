@@ -4,7 +4,7 @@ members = [
   "quill-canvas",
   "quill-app",
   "quill-render-bevy",
-  "quill-render-vello",
+  "quill-render-imaging",
 ]
 resolver = "3"
 

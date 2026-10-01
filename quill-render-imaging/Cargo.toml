@@ -1,0 +1,11 @@
+[package]
+name = "quill-render-imaging"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+bevy_asset.workspace = true
+bevy_ecs.workspace = true
+imaging = { path = "../../xilem/third_party/imaging/imaging" }
+quill-canvas = { path = "../quill-canvas" }
+quill_stroke = { path = "../quill-stroke" }
