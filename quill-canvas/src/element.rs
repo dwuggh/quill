@@ -12,9 +12,11 @@ use crate::{canvas::CanvasMode, input::CanvasInput};
 
 pub mod bounds;
 pub mod eraser;
+pub mod image;
 pub mod page;
 pub mod selection;
 pub mod stroke;
+pub mod text;
 
 pub use selection::{SelectionMode, SelectionOp, SelectionTool};
 

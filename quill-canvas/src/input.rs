@@ -4,10 +4,16 @@
 //! entities. That keeps the same vocabulary usable from the standalone
 //! `Canvas` facade and from a Bevy app using `QuillPlugin`.
 
+use bevy_asset::Handle;
 use bevy_ecs::prelude::*;
+use peniko::kurbo::Size;
 use quill_stroke::input::{Input, InputModeler, WillInputModeler};
 
-use crate::{element::Tool, element::page::PageConfig};
+use crate::{
+    asset::CanvasImage,
+    element::{Tool, page::PageConfig, text::TextElement},
+    geom::CanvasTransform,
+};
 
 /// Global stroke input modeler.
 ///
@@ -44,10 +50,62 @@ pub enum CanvasInput {
 }
 
 /// Non-pointer canvas commands.
-#[derive(Message, Clone, Copy, Debug)]
+#[derive(Message, Clone, Debug)]
 pub enum CanvasCommand {
     /// Replace the active canvas tool.
     SetTool(Tool),
     /// Add a new page entity.
-    AddPage(PageConfig),
+    AddPage(AddPage),
+    /// Add a new image entity.
+    AddImage(AddImage),
+    /// Add a new text entity.
+    AddText(AddText),
+    /// Delete an entity and any hierarchy descendants.
+    DeleteEntity(Entity),
+}
+
+/// Command payload for page creation.
+#[derive(Clone, Debug)]
+pub struct AddPage {
+    /// Owner page/root. `None` means the document root.
+    pub owner: Option<Entity>,
+    /// Page data to create.
+    pub config: PageConfig,
+    /// Transform from page-local coordinates into owner-local coordinates.
+    pub transform: CanvasTransform,
+}
+
+impl AddPage {
+    /// Create a root-level page command with an identity transform.
+    pub fn root(config: PageConfig) -> Self {
+        Self {
+            owner: None,
+            config,
+            transform: CanvasTransform::IDENTITY,
+        }
+    }
+}
+
+/// Command payload for image creation.
+#[derive(Clone, Debug)]
+pub struct AddImage {
+    /// Owner page/root. `None` means the document root.
+    pub owner: Option<Entity>,
+    /// Shared image asset handle.
+    pub image: Handle<CanvasImage>,
+    /// Image-local drawing size.
+    pub size: Size,
+    /// Transform from image-local coordinates into owner-local coordinates.
+    pub transform: CanvasTransform,
+}
+
+/// Command payload for text creation.
+#[derive(Clone, Debug)]
+pub struct AddText {
+    /// Owner page/root. `None` means the document root.
+    pub owner: Option<Entity>,
+    /// Laid-out glyph-run text element.
+    pub text: TextElement,
+    /// Transform from text-local coordinates into owner-local coordinates.
+    pub transform: CanvasTransform,
 }

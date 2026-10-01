@@ -3,7 +3,7 @@
 use bevy_ecs::prelude::Component;
 use peniko::kurbo::{Affine, Point, Rect};
 
-/// Transform from element-local coordinates into canvas coordinates.
+/// Transform from element-local coordinates into owner-local coordinates.
 #[derive(Component, Clone, Copy, Debug, PartialEq)]
 pub struct CanvasTransform {
     /// Affine transform applied to element-local geometry.
@@ -16,12 +16,17 @@ impl CanvasTransform {
         affine: Affine::IDENTITY,
     };
 
-    /// Transform a point into canvas coordinates.
+    /// Transform a point into owner coordinates.
     pub fn transform_point(self, point: Point) -> Point {
         self.affine * point
     }
 
-    /// Transform a rectangle into a conservative canvas-space rectangle.
+    /// Transform a point from owner coordinates into element-local coordinates.
+    pub fn inverse_transform_point(self, point: Point) -> Point {
+        self.affine.inverse() * point
+    }
+
+    /// Transform a rectangle into a conservative owner-space rectangle.
     pub fn transform_rect(self, rect: Rect) -> Rect {
         let points = [
             Point::new(rect.x0, rect.y0),

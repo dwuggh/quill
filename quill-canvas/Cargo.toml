@@ -4,7 +4,9 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+bevy_asset.workspace = true
 bevy_ecs.workspace = true
+bevy_reflect.workspace = true
 peniko.workspace = true
 smallvec.workspace = true
 thiserror.workspace = true

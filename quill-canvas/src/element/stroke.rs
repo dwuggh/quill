@@ -3,9 +3,12 @@
 //! The input modeler is global while a stroke is active. Each completed or
 //! active stroke entity stores the brush snapshot and the latest modeled path.
 
-use bevy_ecs::message::MessageRegistry;
 use bevy_ecs::prelude::*;
 use bevy_ecs::schedule::{IntoScheduleConfigs, Schedule};
+use bevy_ecs::{
+    hierarchy::{ChildOf, Children},
+    message::MessageRegistry,
+};
 use peniko::kurbo::Point;
 use quill_stroke::{
     brush::Brush,
@@ -13,10 +16,12 @@ use quill_stroke::{
 };
 
 use crate::{
-    canvas::{CanvasErrors, CanvasMode, CanvasOrder},
+    canvas::{CanvasErrors, CanvasMode},
+    document::{DocumentRootEntity, owner_point_from_root_query, target_owner_at_query},
     element::{
         StrokeMessage, Tool,
         bounds::{DEFAULT_BOUND_BLOCK_SIZE, RectBound},
+        page::Page,
     },
     error::CanvasError,
     geom::CanvasTransform,
@@ -89,6 +94,8 @@ impl StrokeData {
 pub struct ActiveStroke {
     /// Entity currently receiving modeled path updates.
     pub entity: Option<Entity>,
+    /// Owner page/root latched for the active stroke gesture.
+    pub owner: Option<Entity>,
 }
 
 pub(crate) fn register_stroke_systems(world: &mut World) {
@@ -105,10 +112,13 @@ pub(crate) fn process_stroke_msg(
     mut commands: Commands,
     mut messages: MessageReader<StrokeMessage>,
     mode: Res<CanvasMode>,
+    root: Res<DocumentRootEntity>,
     mut active: ResMut<ActiveStroke>,
-    mut canvas_order: ResMut<CanvasOrder>,
     mut modeler: ResMut<GlobalInputModeler>,
     mut paths: Query<(&mut StrokeData, Option<&mut RectBound>)>,
+    children: Query<&Children>,
+    pages: Query<&Page>,
+    parents: Query<(Option<&CanvasTransform>, Option<&ChildOf>)>,
     mut errors: ResMut<CanvasErrors>,
 ) {
     let Tool::Stroke(brush) = mode.tool else {
@@ -121,6 +131,12 @@ pub(crate) fn process_stroke_msg(
             CanvasInput::PointerEnter(_) | CanvasInput::PointerLeave => {}
             CanvasInput::PointerDown(input) => {
                 active.entity = None;
+                active.owner = None;
+                let root_point = input_to_vec2(input);
+                let owner = target_owner_at_query(root.0, root_point, &children, &pages, &parents);
+                let Some(input) = input_in_owner(input, owner, &parents) else {
+                    continue;
+                };
 
                 // A new stroke owns a fresh modeler state and snapshots the
                 // current brush, so later tool changes do not rewrite it.
@@ -131,18 +147,22 @@ pub(crate) fn process_stroke_msg(
                         let bounds = active_rect_bound_from_path_points(&data.points);
                         let entity = match bounds {
                             Some(bounds) => commands
-                                .spawn((data, bounds, CanvasTransform::IDENTITY))
+                                .spawn((data, bounds, CanvasTransform::IDENTITY, ChildOf(owner)))
                                 .id(),
-                            None => commands.spawn((data, CanvasTransform::IDENTITY)).id(),
+                            None => commands
+                                .spawn((data, CanvasTransform::IDENTITY, ChildOf(owner)))
+                                .id(),
                         };
                         active.entity = Some(entity);
-                        canvas_order.strokes.push(entity);
+                        active.owner = Some(owner);
                     }
                     Err(error) => errors.0.push(CanvasError::from(error)),
                 }
             }
             CanvasInput::PointerMove(input) => {
-                if let Some(entity) = active.entity {
+                if let (Some(entity), Some(owner)) = (active.entity, active.owner)
+                    && let Some(input) = input_in_owner(input, owner, &parents)
+                {
                     update_active_path(
                         &mut commands,
                         entity,
@@ -154,7 +174,9 @@ pub(crate) fn process_stroke_msg(
                 }
             }
             CanvasInput::PointerUp(input) => {
-                if let Some(entity) = active.entity.take() {
+                if let (Some(entity), Some(owner)) = (active.entity.take(), active.owner.take())
+                    && let Some(input) = input_in_owner(input, owner, &parents)
+                {
                     update_active_path(
                         &mut commands,
                         entity,
@@ -249,4 +271,17 @@ fn visible_point_to_vec2(point: PathPoint) -> Option<Point> {
 
 fn point_to_canvas_point(point: PathPoint) -> Point {
     Point::new(f64::from(point.x()), f64::from(point.y()))
+}
+
+fn input_to_vec2(input: Input) -> Point {
+    Point::new(f64::from(input.x()), f64::from(input.y()))
+}
+
+fn input_in_owner(
+    input: Input,
+    owner: Entity,
+    parents: &Query<(Option<&CanvasTransform>, Option<&ChildOf>)>,
+) -> Option<Input> {
+    let local = owner_point_from_root_query(owner, input_to_vec2(input), parents)?;
+    Some(input.with_position(local.x as f32, local.y as f32))
 }

@@ -17,4 +17,12 @@ pub enum CanvasError {
     /// A page command ran but did not report a created page entity.
     #[error("page command completed without creating a page")]
     PageWasNotCreated,
+
+    /// A document command targeted an entity that cannot own children.
+    #[error("invalid document owner {owner:?}")]
+    InvalidOwner { owner: Option<Entity> },
+
+    /// A document command ran but did not report a created entity.
+    #[error("document command completed without creating an entity")]
+    EntityWasNotCreated,
 }

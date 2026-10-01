@@ -30,6 +30,7 @@ use bevy::{
     shader::Shader,
 };
 use bevy_ecs::{
+    hierarchy::{ChildOf, Children},
     query::{Changed, ROQueryItem, With},
     schedule::IntoScheduleConfigs,
     system::{
@@ -38,7 +39,7 @@ use bevy_ecs::{
     },
 };
 use quill_canvas::{
-    canvas::CanvasOrder,
+    document::{DocumentRootEntity, root_from_entity_query},
     element::stroke::{StrokeData, StrokeStatus},
     geom::CanvasTransform,
 };
@@ -84,8 +85,8 @@ struct StrokeLocalUniform {
 }
 
 impl StrokeLocalUniform {
-    fn from_canvas_transform(transform: CanvasTransform) -> Self {
-        let [a, b, c, d, e, f] = transform.affine.as_coeffs();
+    fn from_affine(affine: peniko::kurbo::Affine) -> Self {
+        let [a, b, c, d, e, f] = affine.as_coeffs();
         Self {
             world_from_local: Mat4::from_cols_array(&[
                 a as f32, b as f32, 0.0, 0.0, c as f32, d as f32, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0,
@@ -534,40 +535,51 @@ fn prepare_stroke_bind_group(
     }
 }
 
-type ChangedStrokes<'w, 's> = Query<
-    'w,
-    's,
-    (RenderEntity, &'static StrokeData, &'static CanvasTransform),
-    Changed<StrokeData>,
->;
+type ChangedStrokes<'w, 's> =
+    Query<'w, 's, (RenderEntity, &'static StrokeData), Changed<StrokeData>>;
 
-type ChangedStrokeTransforms<'w, 's> = Query<
-    'w,
-    's,
-    (RenderEntity, &'static CanvasTransform),
-    (With<StrokeData>, Changed<CanvasTransform>),
->;
+type OrderedStrokes<'w, 's> =
+    Query<'w, 's, (Entity, RenderEntity, &'static StrokeData), With<StrokeData>>;
 
-type OrderedStrokeRenderEntities<'w, 's> = Query<'w, 's, RenderEntity, With<StrokeData>>;
+type HierarchyTransforms<'w, 's> =
+    Query<'w, 's, (Option<&'static CanvasTransform>, Option<&'static ChildOf>)>;
 
 fn extract_strokes(
     mut commands: Commands,
-    canvas_order: Extract<Res<CanvasOrder>>,
+    root: Extract<Res<DocumentRootEntity>>,
+    children: Extract<Query<&Children>>,
     changed_strokes: Extract<ChangedStrokes>,
-    changed_transforms: Extract<ChangedStrokeTransforms>,
-    ordered_strokes: Extract<OrderedStrokeRenderEntities>,
+    ordered_strokes: Extract<OrderedStrokes>,
+    hierarchy_transforms: Extract<HierarchyTransforms>,
     mut render_order: ResMut<RenderCanvasOrder>,
     mut render_strokes: Query<&mut RenderStrokeInstance>,
 ) {
+    let mut ordered_main_strokes = Vec::new();
+    collect_strokes_in_document_order(
+        root.0,
+        &children,
+        &ordered_strokes,
+        &mut ordered_main_strokes,
+    );
     render_order.strokes = ordered_strokes
-        .iter_many(canvas_order.strokes.iter().copied())
+        .iter_many(ordered_main_strokes.iter().copied())
+        .map(|(_, render_entity, _)| render_entity)
         .collect();
 
-    for (render_entity, stroke, transform) in &changed_strokes {
-        commands.entity(render_entity).insert((
-            StrokeLocalUniform::from_canvas_transform(*transform),
-            StrokeParamsUniform::from_stroke(stroke),
-        ));
+    for (main_entity, render_entity, _) in
+        ordered_strokes.iter_many(ordered_main_strokes.iter().copied())
+    {
+        let transform = root_from_entity_query(main_entity, &hierarchy_transforms)
+            .unwrap_or(peniko::kurbo::Affine::IDENTITY);
+        commands
+            .entity(render_entity)
+            .insert(StrokeLocalUniform::from_affine(transform));
+    }
+
+    for (render_entity, stroke) in &changed_strokes {
+        commands
+            .entity(render_entity)
+            .insert(StrokeParamsUniform::from_stroke(stroke));
 
         if let Ok(mut instance) = render_strokes.get_mut(render_entity) {
             instance.update_from_stroke(stroke);
@@ -577,11 +589,23 @@ fn extract_strokes(
                 .insert(RenderStrokeInstance::from_stroke(stroke));
         }
     }
+}
 
-    for (render_entity, transform) in &changed_transforms {
-        commands
-            .entity(render_entity)
-            .insert(StrokeLocalUniform::from_canvas_transform(*transform));
+fn collect_strokes_in_document_order(
+    owner: Entity,
+    children: &Query<&Children>,
+    strokes: &OrderedStrokes,
+    output: &mut Vec<Entity>,
+) {
+    let Ok(owner_children) = children.get(owner) else {
+        return;
+    };
+
+    for child in owner_children.iter() {
+        if strokes.get(*child).is_ok() {
+            output.push(*child);
+        }
+        collect_strokes_in_document_order(*child, children, strokes, output);
     }
 }
 

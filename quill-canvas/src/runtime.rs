@@ -7,7 +7,9 @@ use bevy_ecs::{
 };
 
 use crate::{
-    canvas::{CanvasErrors, CanvasMode, CanvasOrder, LastAddedPage, apply_canvas_commands},
+    asset::{CanvasFont, CanvasImage},
+    canvas::{CanvasErrors, CanvasMode, CanvasOrder, LastAddedEntity, apply_canvas_commands},
+    document::init_document_root,
     element::{
         Tool, eraser::register_eraser_systems, route_canvas_input,
         selection::register_selection_systems, stroke::register_stroke_systems,
@@ -74,9 +76,12 @@ impl Default for CanvasRuntime {
 pub fn init_canvas_world(world: &mut World) {
     MessageRegistry::register_message::<CanvasInput>(world);
     MessageRegistry::register_message::<CanvasCommand>(world);
-    world.init_resource::<CanvasErrors>();
-    world.init_resource::<LastAddedPage>();
+    world.init_resource::<bevy_asset::Assets<CanvasImage>>();
+    world.init_resource::<bevy_asset::Assets<CanvasFont>>();
+    init_document_root(world);
     world.init_resource::<CanvasOrder>();
+    world.init_resource::<CanvasErrors>();
+    world.init_resource::<LastAddedEntity>();
     world.insert_resource(CanvasMode::new(Tool::default()));
 
     register_stroke_systems(world);
