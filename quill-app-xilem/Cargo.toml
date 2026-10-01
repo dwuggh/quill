@@ -1,0 +1,17 @@
+[package]
+name = "quill-app-xilem"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "quill-xilem"
+path = "src/main.rs"
+
+[dependencies]
+bevy_ecs.workspace = true
+quill-canvas = { path = "../quill-canvas" }
+quill-render-imaging = { path = "../quill-render-imaging" }
+quill_stroke = { path = "../quill-stroke" }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+xilem = { path = "../../xilem/xilem", default-features = false, features = ["imaging_vello_hybrid"] }
