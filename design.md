@@ -88,6 +88,10 @@ post processing after its finished(pointer up).
 - pixel-wise
   only delete the "pixel" it cover or sweep by. We also expect it split paths correctly(freenote fails to do that). This is useful with markers, but the hardest one for implementation. 
   TODO idea: we store the eraser path, once its done, compute and split affected entities, and generate a entity-specific eraser area for each entity.
+  
+  We expect doing `boolean path operations` over it. relevant:
+  - https://github.com/linebender/kurbo/issues/277
+  - https://github.com/simoncozens/linesweeper
 - point-wise
   this is current implementation. it deletes whatever path points it meet. current implementation
   is only this style.
@@ -151,6 +155,7 @@ slint has a ongoing pr using that.
 ### wgpu-based GUI framework
 - slint?
   The best choice so far, but not favor of a using new markup language. my choice for now.
+  Edit: even the offcial example has bugs, and takes forever to compile. we still use xilem.
 - iced?
   I don't like its ui abstractions, so no.
 - gpui?
@@ -167,3 +172,31 @@ slint has a ongoing pr using that.
 - kotlin-based
   good on android and bad for everything else. don't worth the investment.
 
+
+# CSG based 2D rendering
+pipeline: CSG tree -> find intersections -> produce bulk and boundary tiles -> render
+CSG shapes includes 2 bounding: inner bounding and outer bounding.
+We first write the CSG expression as canonical form:
+$ \union (\intersect B_i) $
+then the leaf node will store $\intersect B_i$.
+The CSG tree will be like r-tree or interval-tree, a balanced, partial sorted tree by
+the (outer?) bounding boxes. the intermediate leaf nodes stores the outer bounding boxes
+of all children.
+- finding bulks and boundaries
+unlike in vello's sparse strips, we would like to find the bulk and boundary tiles at same
+time, not by counting winding numbers. choose the root Nodes outer bounding box's lines to start.
+- algorithm:
+```
+for bbox:
+    transfrom to local coordinates
+    align box line to pixel line
+    outside
+    find both side's status with CSG tree: filled, mixed, empty
+    if empty:
+        cutoff
+    if filled:
+        mark region as bulk
+    if mixed:
+        do scanning in all leaves.
+```
+    
