@@ -143,6 +143,19 @@ impl PathPoint {
             },
         }
     }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(x: f32, y: f32, pressure: f32) -> Self {
+        Self {
+            x,
+            y,
+            pressure,
+            altitude: 0.0,
+            azimuth: 0.0,
+            t: 0.0,
+            visibility: PATH_POINT_VISIBLE,
+        }
+    }
 }
 
 fn lerp_value(a: f32, b: f32, t: f32) -> f32 {
