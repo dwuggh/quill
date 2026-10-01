@@ -102,6 +102,36 @@ impl SelectionState {
         self.selected.contains(&entity)
     }
 
+    /// Remove one entity from the current selection and repair the primary.
+    pub fn remove_entity(&mut self, entity: Entity) {
+        self.selected.remove(&entity);
+        self.repair_primary();
+    }
+
+    /// Replace one selected entity with replacement entities.
+    ///
+    /// This is used by tools that structurally rewrite a drawable, such as a
+    /// stroke eraser splitting one stroke into several fragment entities.
+    pub fn replace_entity(&mut self, old: Entity, replacements: impl IntoIterator<Item = Entity>) {
+        let was_selected = self.selected.remove(&old);
+        let was_primary = self.primary == Some(old);
+        if !was_selected {
+            self.repair_primary();
+            return;
+        }
+
+        let mut first = None;
+        for entity in replacements {
+            first.get_or_insert(entity);
+            self.selected.insert(entity);
+        }
+
+        if was_primary {
+            self.primary = first;
+        }
+        self.repair_primary();
+    }
+
     /// Apply hit results to the current selection with the requested operation.
     pub fn apply(&mut self, op: SelectionOp, hits: impl IntoIterator<Item = Entity>) {
         match op {
@@ -292,6 +322,21 @@ mod tests {
 
         assert!(state.contains(first));
         assert!(!state.contains(second));
+        assert_eq!(state.primary(), Some(first));
+    }
+    #[test]
+    fn replace_entity_transfers_selected_membership() {
+        let old = Entity::from_raw_u32(1).unwrap();
+        let first = Entity::from_raw_u32(2).unwrap();
+        let second = Entity::from_raw_u32(3).unwrap();
+        let mut state = SelectionState::default();
+        state.apply(SelectionOp::Replace, [old]);
+
+        state.replace_entity(old, [first, second]);
+
+        assert!(!state.contains(old));
+        assert!(state.contains(first));
+        assert!(state.contains(second));
         assert_eq!(state.primary(), Some(first));
     }
 }

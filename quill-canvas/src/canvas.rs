@@ -34,13 +34,6 @@ impl CanvasMode {
     }
 }
 
-/// Draw order for canvas elements.
-#[derive(Resource, Default)]
-pub struct CanvasOrder {
-    /// Stroke entities in document draw order.
-    pub strokes: Vec<Entity>,
-}
-
 /// The abstract drawable canvas.
 pub struct Canvas {
     /// Private ECS runtime that owns scene resources, entities, and messages.
@@ -256,17 +249,20 @@ mod tests {
         Brush, Fill, Style,
         kurbo::{Affine, Rect, Size},
     };
+    use quill_stroke::input::{Input, InputModeler, PathPoint, WillInputModeler};
 
     use super::*;
     use crate::{
         asset::{CanvasFont, CanvasImage},
+        document::DocumentRootEntity,
         element::{
+            EraserConfig, EraserMode, EraserShape,
             image::ImageElement,
-            stroke::StrokeData,
+            selection::{SelectionOp, SelectionState},
+            stroke::{StrokeBrush, StrokeData, rect_bound_from_path_points},
             text::{CanvasGlyph, TextElement},
         },
     };
-    use quill_stroke::input::Input;
 
     #[test]
     fn init_creates_document_root_and_asset_collections() {
@@ -357,6 +353,183 @@ mod tests {
         assert!((stroke.points[0].y() - 20.0).abs() < 0.001);
     }
 
+    #[test]
+    fn pixel_eraser_masks_visible_strokes_across_pages() {
+        let mut canvas = Canvas::new();
+        let first = canvas.add_page(PageConfig::default()).unwrap();
+        let second = canvas
+            .add_page_to(
+                None,
+                PageConfig::default(),
+                CanvasTransform {
+                    affine: Affine::translate((200.0, 0.0)),
+                },
+            )
+            .unwrap();
+
+        let first_stroke = spawn_stroke(&mut canvas, first, &[(10.0, 10.0), (20.0, 10.0)]);
+        let second_stroke = spawn_stroke(&mut canvas, second, &[(10.0, 10.0), (20.0, 10.0)]);
+        canvas
+            .change_tool(Tool::Eraser(EraserConfig::new(EraserShape::Circle, 2.0)))
+            .unwrap();
+        canvas
+            .input(CanvasInput::PointerDown(Input::new(10.0, 10.0, 10.0)))
+            .unwrap();
+        canvas
+            .input(CanvasInput::PointerUp(Input::new(210.0, 10.0, 11.0)))
+            .unwrap();
+
+        let world = canvas.world();
+        assert!(world.get::<StrokeData>(first_stroke).is_none());
+        assert!(world.get::<StrokeData>(second_stroke).is_some());
+        assert!(world.get::<RectBound>(second_stroke).unwrap().rect.x0 > 10.0);
+    }
+
+    #[test]
+    fn eraser_can_mask_page_child_outside_page_rect() {
+        let mut canvas = Canvas::new();
+        let page = canvas.add_page(PageConfig::default()).unwrap();
+        let stroke = spawn_stroke(&mut canvas, page, &[(-20.0, -20.0), (-10.0, -20.0)]);
+
+        canvas
+            .change_tool(Tool::Eraser(EraserConfig::new(EraserShape::Circle, 2.0)))
+            .unwrap();
+        canvas
+            .input(CanvasInput::PointerDown(
+                Input::new(-15.0, -22.0, 0.0).with_pressure(1.0),
+            ))
+            .unwrap();
+        canvas
+            .input(CanvasInput::PointerUp(
+                Input::new(-15.0, -18.0, 1.0).with_pressure(1.0),
+            ))
+            .unwrap();
+
+        let world = canvas.world();
+        assert!(world.get::<StrokeData>(stroke).is_none());
+    }
+
+    #[test]
+    fn pixel_eraser_replaces_hit_strokes_with_fragments() {
+        let mut canvas = Canvas::new();
+        let root = canvas.world().resource::<DocumentRootEntity>().0;
+        let first = spawn_stroke(
+            &mut canvas,
+            root,
+            &[(0.0, 0.0), (1.0, 0.0), (2.0, 0.0), (3.0, 0.0), (4.0, 0.0)],
+        );
+        let second = spawn_stroke(
+            &mut canvas,
+            root,
+            &[
+                (0.0, 10.0),
+                (1.0, 10.0),
+                (2.0, 10.0),
+                (3.0, 10.0),
+                (4.0, 10.0),
+            ],
+        );
+
+        canvas
+            .change_tool(Tool::Eraser(EraserConfig::new(EraserShape::Circle, 0.25)))
+            .unwrap();
+        canvas
+            .input(CanvasInput::PointerDown(
+                Input::new(2.0, -1.0, 0.0).with_pressure(1.0),
+            ))
+            .unwrap();
+        canvas
+            .input(CanvasInput::PointerUp(
+                Input::new(2.0, 11.0, 1.0).with_pressure(1.0),
+            ))
+            .unwrap();
+
+        let world = canvas.world();
+        assert!(world.get::<StrokeData>(first).is_none());
+        assert!(world.get::<StrokeData>(second).is_none());
+        let fragments = world
+            .get::<Children>(root)
+            .unwrap()
+            .iter()
+            .filter(|entity| world.get::<StrokeData>(*entity).is_some())
+            .collect::<Vec<_>>();
+
+        assert_eq!(fragments.len(), 4);
+        for fragment in fragments {
+            assert_eq!(world.get::<ChildOf>(fragment).unwrap().0, root);
+            assert!(world.get::<RectBound>(fragment).is_some());
+        }
+    }
+
+    #[test]
+    fn eraser_replaces_selected_stroke_with_selected_fragments() {
+        let mut canvas = Canvas::new();
+        let root = canvas.world().resource::<DocumentRootEntity>().0;
+        let stroke = spawn_stroke(
+            &mut canvas,
+            root,
+            &[(0.0, 0.0), (4.0, 0.0), (6.0, 0.0), (10.0, 0.0)],
+        );
+        canvas
+            .world_mut()
+            .resource_mut::<SelectionState>()
+            .apply(SelectionOp::Replace, [stroke]);
+
+        canvas
+            .change_tool(Tool::Eraser(EraserConfig::new(EraserShape::Circle, 0.5)))
+            .unwrap();
+        canvas
+            .input(CanvasInput::PointerDown(
+                Input::new(5.0, -2.0, 0.0).with_pressure(1.0),
+            ))
+            .unwrap();
+        canvas
+            .input(CanvasInput::PointerUp(
+                Input::new(5.0, 2.0, 1.0).with_pressure(1.0),
+            ))
+            .unwrap();
+
+        let world = canvas.world();
+        let selection = world.resource::<SelectionState>();
+        assert!(!selection.contains(stroke));
+        assert_eq!(selection.selected().len(), 2);
+        for entity in selection.selected() {
+            assert!(world.get::<StrokeData>(*entity).is_some());
+            assert!(world.get::<RectBound>(*entity).is_some());
+        }
+    }
+
+    #[test]
+    fn item_eraser_deletes_hit_strokes() {
+        let mut canvas = Canvas::new();
+        let root = canvas.world().resource::<DocumentRootEntity>().0;
+        let hit = spawn_stroke(&mut canvas, root, &[(0.0, 0.0), (4.0, 0.0)]);
+        let miss = spawn_stroke(&mut canvas, root, &[(0.0, 10.0), (4.0, 10.0)]);
+        let mut config = EraserConfig::new(EraserShape::Circle, 2.0);
+        config.mode = EraserMode::ItemWise;
+        canvas
+            .world_mut()
+            .resource_mut::<SelectionState>()
+            .apply(SelectionOp::Replace, [hit]);
+
+        canvas.change_tool(Tool::Eraser(config)).unwrap();
+        canvas
+            .input(CanvasInput::PointerDown(
+                Input::new(2.0, -1.0, 0.0).with_pressure(1.0),
+            ))
+            .unwrap();
+        canvas
+            .input(CanvasInput::PointerUp(
+                Input::new(2.0, 1.0, 1.0).with_pressure(1.0),
+            ))
+            .unwrap();
+
+        let world = canvas.world();
+        assert!(world.get::<StrokeData>(hit).is_none());
+        assert!(world.get::<StrokeData>(miss).is_some());
+        assert!(!world.resource::<SelectionState>().contains(hit));
+    }
+
     fn test_text() -> TextElement {
         TextElement {
             font: Handle::default(),
@@ -374,5 +547,28 @@ mod tests {
             normalized_coords: Vec::new(),
             bounds: Rect::new(0.0, 0.0, 16.0, 16.0),
         }
+    }
+
+    fn spawn_stroke(canvas: &mut Canvas, owner: Entity, coords: &[(f32, f32)]) -> Entity {
+        let brush = match Tool::default() {
+            Tool::Stroke(brush) => StrokeBrush { brush },
+            _ => unreachable!(),
+        };
+        let points = coords
+            .iter()
+            .map(|(x, y)| modeled_point(*x, *y))
+            .collect::<Vec<_>>();
+        let data = StrokeData::from_finished_points(brush, points);
+        let bounds = rect_bound_from_path_points(&data.points).unwrap();
+        canvas
+            .world_mut()
+            .spawn((data, bounds, CanvasTransform::IDENTITY, ChildOf(owner)))
+            .id()
+    }
+
+    fn modeled_point(x: f32, y: f32) -> PathPoint {
+        let input = Input::new(x, y, 0.0).with_pressure(1.0);
+        let mut modeler = WillInputModeler::new();
+        modeler.enqueue(&[input], &[]).unwrap().updated[0]
     }
 }

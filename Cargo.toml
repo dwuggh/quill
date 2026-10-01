@@ -19,6 +19,7 @@ bevy = { version = "0.18.1", features = ["debug"] }
 bevy_asset = "0.18.1"
 bevy_ecs = "0.18.1"
 bevy_reflect = "0.18.1"
+bitflags = "2.11.0"
 bytemuck = { version = "1.25.0", features = ["derive"] }
 futures-lite = "2.6.1"
 ordered-float = { version = "5.3.0", features = ["bytemuck"] }

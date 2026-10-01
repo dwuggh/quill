@@ -25,7 +25,7 @@ pub use selection::{SelectionMode, SelectionOp, SelectionTool};
 pub enum Tool {
     /// Draw modeled strokes with the configured brush.
     Stroke(Brush),
-    /// Remove path points covered by the eraser footprint.
+    /// Mask pixels or delete drawable items covered by the eraser footprint.
     Eraser(EraserConfig),
     /// Select existing canvas elements.
     Selection(SelectionTool),
@@ -42,27 +42,66 @@ pub enum EraserShape {
     Square,
 }
 
-/// Configuration for the point eraser tool.
+/// Eraser behavior used when a gesture hits drawable elements.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EraserMode {
+    /// Persist pixel masks on hit drawables.
+    PixelWise,
+    /// Delete hit drawables as whole items.
+    ItemWise,
+}
+
+/// Configuration for the eraser tool.
 #[derive(Clone, Copy, Debug)]
 pub struct EraserConfig {
+    /// Whether the eraser masks pixels or deletes whole items.
+    pub mode: EraserMode,
     /// Eraser footprint shape.
     pub shape: EraserShape,
     /// Circle radius or square half-side in canvas units.
     pub size: f32,
+    /// Drawable element classes affected by the eraser.
+    pub targets: EraserTargets,
 }
 
 impl EraserConfig {
     /// Create an eraser configuration from a footprint shape and size.
     pub fn new(shape: EraserShape, size: f32) -> Self {
-        Self { shape, size }
+        Self {
+            mode: EraserMode::PixelWise,
+            shape,
+            size,
+            targets: EraserTargets::STROKES,
+        }
+    }
+}
+
+bitflags::bitflags! {
+    /// Drawable element classes affected by eraser gestures.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct EraserTargets: u8 {
+        /// Erase stroke drawables.
+        const STROKES = 0b0000_0001;
+        /// Erase image drawables.
+        const IMAGES = 0b0000_0010;
+        /// Erase text drawables.
+        const TEXT = 0b0000_0100;
+    }
+}
+
+impl Default for EraserTargets {
+    fn default() -> Self {
+        Self::STROKES
     }
 }
 
 impl Default for EraserConfig {
     fn default() -> Self {
         Self {
+            mode: EraserMode::PixelWise,
             shape: EraserShape::Circle,
             size: 12.0,
+            targets: EraserTargets::STROKES,
         }
     }
 }

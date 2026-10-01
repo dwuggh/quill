@@ -7,6 +7,7 @@ edition.workspace = true
 bevy_asset.workspace = true
 bevy_ecs.workspace = true
 bevy_reflect.workspace = true
+bitflags.workspace = true
 peniko.workspace = true
 smallvec.workspace = true
 thiserror.workspace = true

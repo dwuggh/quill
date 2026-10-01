@@ -8,7 +8,7 @@ use bevy_ecs::{
 
 use crate::{
     asset::{CanvasFont, CanvasImage},
-    canvas::{CanvasErrors, CanvasMode, CanvasOrder, LastAddedEntity, apply_canvas_commands},
+    canvas::{CanvasErrors, CanvasMode, LastAddedEntity, apply_canvas_commands},
     document::init_document_root,
     element::{
         Tool, eraser::register_eraser_systems, route_canvas_input,
@@ -79,7 +79,6 @@ pub fn init_canvas_world(world: &mut World) {
     world.init_resource::<bevy_asset::Assets<CanvasImage>>();
     world.init_resource::<bevy_asset::Assets<CanvasFont>>();
     init_document_root(world);
-    world.init_resource::<CanvasOrder>();
     world.init_resource::<CanvasErrors>();
     world.init_resource::<LastAddedEntity>();
     world.insert_resource(CanvasMode::new(Tool::default()));

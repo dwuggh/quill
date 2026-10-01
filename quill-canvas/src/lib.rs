@@ -23,6 +23,7 @@ pub mod prelude {
         canvas::CanvasMode,
         document::{DocumentRoot, DocumentRootEntity},
         element::bounds::{BoundHit, BoundHits, BoundKey, RectBound, RoundBound, SubRectBound},
+        element::eraser::{ActiveEraser, Hidden, Mask, MaskSegment},
         element::image::ImageElement,
         element::page::{Page, PageBackground, PageBackgroundItem, PageConfig},
         element::selection::{
@@ -30,7 +31,7 @@ pub mod prelude {
         },
         element::stroke::{ActiveStroke, StrokeBrush, StrokeData},
         element::text::{CanvasGlyph, CanvasNormalizedCoord, TextElement},
-        element::{EraserConfig, EraserShape, Tool},
+        element::{EraserConfig, EraserMode, EraserShape, EraserTargets, Tool},
         error::CanvasError,
         geom::CanvasTransform,
         input::{AddImage, AddPage, AddText, CanvasInput, GlobalInputModeler},
