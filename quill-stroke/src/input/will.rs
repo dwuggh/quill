@@ -461,34 +461,6 @@ impl PathPoint {
         }
     }
 
-    fn lerp(self, other: Self, t: f32) -> Self {
-        Self {
-            x: Self::lerp_value(self.x, other.x, t),
-            y: Self::lerp_value(self.y, other.y, t),
-            pressure: Self::lerp_value(self.pressure, other.pressure, t).clamp(0.0, 1.0),
-            altitude: Self::lerp_sensor(self.altitude, other.altitude, t),
-            azimuth: Self::lerp_sensor(self.azimuth, other.azimuth, t),
-            t: Self::lerp_value(self.t, other.t, t),
-            visibility: if self.is_visible() && other.is_visible() {
-                1
-            } else {
-                0
-            },
-        }
-    }
-
-    fn lerp_value(a: f32, b: f32, t: f32) -> f32 {
-        a + (b - a) * t
-    }
-
-    fn lerp_sensor(a: f32, b: f32, t: f32) -> f32 {
-        match (a.is_finite(), b.is_finite()) {
-            (true, true) => Self::lerp_value(a, b, t),
-            (true, false) => a,
-            (false, true) | (false, false) => b,
-        }
-    }
-
     fn is_finite(self) -> bool {
         self.x.is_finite()
             && self.y.is_finite()

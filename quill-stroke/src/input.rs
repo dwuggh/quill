@@ -41,6 +41,14 @@ impl Input {
         self
     }
 
+    /// Return this sample with a different position and the same timing and
+    /// tablet metadata.
+    pub fn with_position(mut self, x: f32, y: f32) -> Self {
+        self.x = x;
+        self.y = y;
+        self
+    }
+
     pub fn x(self) -> f32 {
         self.x
     }
@@ -114,6 +122,38 @@ impl PathPoint {
     pub fn with_visibility(mut self, visible: bool) -> Self {
         self.set_visible(visible);
         self
+    }
+
+    /// Linearly interpolate this point toward `other`.
+    ///
+    /// This keeps tablet metadata continuous when geometry code needs to cut a
+    /// modeled stroke segment, for example when an eraser creates fragments.
+    pub fn lerp(self, other: Self, t: f32) -> Self {
+        Self {
+            x: lerp_value(self.x, other.x, t),
+            y: lerp_value(self.y, other.y, t),
+            pressure: lerp_value(self.pressure, other.pressure, t).clamp(0.0, 1.0),
+            altitude: lerp_sensor(self.altitude, other.altitude, t),
+            azimuth: lerp_sensor(self.azimuth, other.azimuth, t),
+            t: lerp_value(self.t, other.t, t),
+            visibility: if self.is_visible() && other.is_visible() {
+                PATH_POINT_VISIBLE
+            } else {
+                PATH_POINT_HIDDEN
+            },
+        }
+    }
+}
+
+fn lerp_value(a: f32, b: f32, t: f32) -> f32 {
+    a + (b - a) * t
+}
+
+fn lerp_sensor(a: f32, b: f32, t: f32) -> f32 {
+    match (a.is_finite(), b.is_finite()) {
+        (true, true) => lerp_value(a, b, t),
+        (true, false) => a,
+        (false, true) | (false, false) => b,
     }
 }
 
