@@ -108,6 +108,10 @@ pub(crate) fn install_stroke_systems(schedule: &mut Schedule) {
     schedule.add_systems(process_stroke_msg.in_set(QuillUpdateSet::ToolMessages));
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Bevy injects independent resource and component borrows into this system"
+)]
 pub(crate) fn process_stroke_msg(
     mut commands: Commands,
     mut messages: MessageReader<StrokeMessage>,

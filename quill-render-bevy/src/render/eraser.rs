@@ -8,7 +8,6 @@ use bevy::{
     app::{App, Plugin, Update},
     asset::{Assets, Handle},
     core_pipeline::core_2d::{CORE_2D_DEPTH_FORMAT, Transparent2d},
-    image::BevyDefault,
     math::{FloatOrd, Vec2},
     prelude::{Commands, Res, ResMut, Resource},
     render::{
@@ -44,101 +43,20 @@ use quill_canvas::{
     input::CanvasInput,
     runtime::QuillUpdateSet,
 };
-use quill_stroke::input::Input;
+use quill_stroke::{gpu::ERASER_SHADER, input::Input};
 
 const CIRCLE_SHAPE: u32 = 0;
 const SQUARE_SHAPE: u32 = 1;
 const DEFAULT_BORDER_WIDTH: f32 = 1.0;
 const ERASER_OVERLAY_SORT_Z: f32 = f32::MAX;
 
-const ERASER_SHADER: &str = r#"
-struct View {
-    clip_from_world: mat4x4<f32>,
-};
-
-struct EraserPreview {
-    center: vec2<f32>,
-    half_size: f32,
-    border_width: f32,
-    shape: u32,
-    visible: u32,
-};
-
-struct VertexOutput {
-    @builtin(position) clip_position: vec4<f32>,
-    @location(0) offset: vec2<f32>,
-};
-
-@group(0) @binding(0) var<uniform> view: View;
-@group(0) @binding(1) var<uniform> eraser: EraserPreview;
-
-@vertex
-fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
-    let outer = max(eraser.half_size, 0.0) + max(eraser.border_width, 0.0);
-    var corners = array<vec2<f32>, 6>(
-        vec2<f32>(-1.0, -1.0),
-        vec2<f32>(1.0, -1.0),
-        vec2<f32>(-1.0, 1.0),
-        vec2<f32>(-1.0, 1.0),
-        vec2<f32>(1.0, -1.0),
-        vec2<f32>(1.0, 1.0),
-    );
-
-    let offset = corners[vertex_index] * outer;
-    let world_position = eraser.center + offset;
-
-    var output: VertexOutput;
-    output.clip_position = view.clip_from_world * vec4<f32>(world_position, 0.0, 1.0);
-    output.offset = offset;
-    return output;
-}
-
-@fragment
-fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
-    if eraser.visible == 0u {
-        return vec4<f32>(0.0);
-    }
-
-    let half_size = max(eraser.half_size, 0.0);
-    let border_width = max(eraser.border_width, 0.0);
-    let outer = half_size + border_width;
-    if outer <= 0.0 {
-        return vec4<f32>(0.0);
-    }
-
-    var distance: f32;
-    if eraser.shape == 0u {
-        distance = length(input.offset);
-    } else {
-        distance = max(abs(input.offset.x), abs(input.offset.y));
-    }
-
-    let alpha = clamp(outer + 0.75 - distance, 0.0, 1.0);
-    let fill_color = vec3<f32>(1.0, 1.0, 1.0);
-    let border_color = vec3<f32>(0.0, 0.0, 0.0);
-    let color = select(fill_color, border_color, distance >= half_size);
-    return vec4<f32>(color, alpha);
-}
-"#;
-
 /// Main-world eraser preview state extracted into the render world each frame.
-#[derive(Clone, Resource, ExtractResource)]
+#[derive(Clone, Default, Resource, ExtractResource)]
 struct EraserPreviewState {
     config: EraserConfig,
     position: Option<Vec2>,
     pointer_inside: bool,
     visible: bool,
-}
-
-impl Default for EraserPreviewState {
-    fn default() -> Self {
-        Self {
-            config: EraserConfig::default(),
-            position: None,
-            pointer_inside: false,
-            visible: false,
-        }
-    }
 }
 
 /// Uniform consumed by the eraser preview shader.
@@ -177,6 +95,8 @@ struct EraserPreviewGpu {
 #[derive(Debug, PartialEq, Eq, Clone, Hash)]
 pub struct EraserPreviewPipelineKey {
     msaa_samples: u32,
+    /// Attachment format shared with the canvas view.
+    target_format: TextureFormat,
 }
 
 /// Render pipeline resources shared by eraser preview draw commands.
@@ -199,7 +119,7 @@ impl bevy::render::render_resource::SpecializedRenderPipeline for EraserPreviewP
             fragment: Some(FragmentState {
                 shader: self.shader.clone(),
                 targets: vec![Some(ColorTargetState {
-                    format: TextureFormat::bevy_default(),
+                    format: key.target_format,
                     blend: Some(BlendState::ALPHA_BLENDING),
                     write_mask: ColorWrites::ALL,
                 })],
@@ -217,8 +137,8 @@ impl bevy::render::render_resource::SpecializedRenderPipeline for EraserPreviewP
             },
             depth_stencil: Some(DepthStencilState {
                 format: CORE_2D_DEPTH_FORMAT,
-                depth_write_enabled: false,
-                depth_compare: CompareFunction::GreaterEqual,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(CompareFunction::GreaterEqual),
                 stencil: StencilState::default(),
                 bias: DepthBiasState::default(),
             }),
@@ -445,10 +365,12 @@ fn queue_eraser_preview(
             &eraser_pipeline,
             EraserPreviewPipelineKey {
                 msaa_samples: msaa.samples(),
+                target_format: view.target_format,
             },
         );
 
-        transparent_phase.add(Transparent2d {
+        // Drop the previous preview when the eraser becomes hidden next frame.
+        transparent_phase.add_transient(Transparent2d {
             sort_key: FloatOrd(ERASER_OVERLAY_SORT_Z),
             entity: (view_entity, view.retained_view_entity.main_entity),
             pipeline,

@@ -1,7 +1,7 @@
 //! Bevy render integration for canvas elements.
 //!
 //! `stroke` owns the stroke draw pipeline. `offscreen` owns the manual target
-//! and render-graph handoff used by host UI renderers.
+//! and render-schedule handoff used by host UI renderers.
 
 pub mod eraser;
 pub mod offscreen;

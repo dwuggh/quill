@@ -28,20 +28,7 @@ impl CanvasTransform {
 
     /// Transform a rectangle into a conservative owner-space rectangle.
     pub fn transform_rect(self, rect: Rect) -> Rect {
-        let points = [
-            Point::new(rect.x0, rect.y0),
-            Point::new(rect.x0, rect.y1),
-            Point::new(rect.x1, rect.y0),
-            Point::new(rect.x1, rect.y1),
-        ];
-        let first = self.transform_point(points[0]);
-        points[1..]
-            .iter()
-            .copied()
-            .map(|point| self.transform_point(point))
-            .fold(Rect::from_points(first, first), |rect, point| {
-                rect.union_pt(point)
-            })
+        self.affine.transform_rect_bbox(rect)
     }
 }
 

@@ -1,5 +1,8 @@
 //! Bevy renderer integration for Quill canvas scenes.
 
+// WGPU 29's resource wrappers require deeper auto-trait evaluation.
+#![recursion_limit = "256"]
+
 pub mod canvas;
 pub mod render;
 

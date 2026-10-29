@@ -7,18 +7,17 @@ use bevy::{
     core_pipeline::CorePipelinePlugin,
     image::ImagePlugin,
     mesh::Mesh,
-    prelude::{ClearColor, Color, Deref, DerefMut, Resource},
+    prelude::{ClearColor, Color, Deref, DerefMut, IntoScheduleConfigs, Res, Resource},
     render::{
         RenderApp, RenderPlugin,
         extract_resource::{ExtractResource, ExtractResourcePlugin},
-        render_graph::{self, NodeRunError, RenderGraph, RenderGraphContext, RenderLabel},
         render_resource::{
             Texture, TextureDescriptor, TextureDimension, TextureFormat, TextureUsages,
             TextureViewDescriptor,
         },
         renderer::{
-            RenderAdapter, RenderAdapterInfo, RenderContext, RenderDevice, RenderInstance,
-            RenderQueue,
+            RenderAdapter, RenderAdapterInfo, RenderContext, RenderDevice, RenderGraph,
+            RenderGraphSystems, RenderInstance, RenderQueue,
         },
         settings::RenderCreation,
         texture::{ManualTextureView, ManualTextureViews},
@@ -57,7 +56,7 @@ impl OffscreenRenderConfig {
     }
 }
 
-/// Installs Bevy's manual renderer and the render-target handoff graph node.
+/// Installs Bevy's manual renderer and the render-target handoff systems.
 pub struct OffscreenRenderPlugin;
 
 impl Plugin for OffscreenRenderPlugin {
@@ -148,19 +147,20 @@ pub(crate) fn install_render_target(app: &mut App, target: Texture, texture_view
 #[derive(Resource, Deref)]
 struct ReadyFrameSender(async_channel::Sender<Texture>);
 
-/// Plugin that appends a render graph node for handing the current target to the host.
+/// Orders target preparation before rendering and host handoff after GPU submission.
 struct CanvasRenderToTexturePlugin(async_channel::Sender<Texture>);
 
 impl Plugin for CanvasRenderToTexturePlugin {
     fn build(&self, app: &mut App) {
         let render_app = app.sub_app_mut(RenderApp);
 
-        let mut graph = render_app.world_mut().resource_mut::<RenderGraph>();
-        graph.add_node(CanvasPrepareTarget, CanvasPrepareTargetDriver);
-        graph.add_node(CanvasSwapChain, CanvasSwapChainDriver);
-        graph.add_node_edge(CanvasPrepareTarget, bevy::render::graph::CameraDriverLabel);
-        graph.add_node_edge(bevy::render::graph::CameraDriverLabel, CanvasSwapChain);
-
+        render_app.add_systems(
+            RenderGraph,
+            (
+                prepare_render_target.in_set(RenderGraphSystems::Begin),
+                publish_render_target.in_set(RenderGraphSystems::Finish),
+            ),
+        );
         render_app.insert_resource(ReadyFrameSender(self.0.clone()));
     }
 }
@@ -169,60 +169,23 @@ impl Plugin for CanvasRenderToTexturePlugin {
 #[derive(Clone, Resource, ExtractResource, Deref, DerefMut)]
 struct BackBuffer(pub Option<Texture>);
 
-/// Render graph label for preparing a recycled target before camera rendering.
-#[derive(Debug, PartialEq, Eq, Clone, Hash, RenderLabel)]
-struct CanvasPrepareTarget;
-
-/// Render graph label for the host texture handoff node.
-#[derive(Debug, PartialEq, Eq, Clone, Hash, RenderLabel)]
-struct CanvasSwapChain;
-
-/// Render graph node that transitions the current target for color attachment writes.
-#[derive(Default)]
-struct CanvasPrepareTargetDriver;
-
-impl render_graph::Node for CanvasPrepareTargetDriver {
-    fn run(
-        &self,
-        _graph: &mut RenderGraphContext,
-        render_context: &mut RenderContext,
-        world: &bevy::ecs::world::World,
-    ) -> Result<(), NodeRunError> {
-        let back_buffer = world.resource::<BackBuffer>();
-
-        if let Some(back_buffer) = &back_buffer.0 {
-            render_context.command_encoder().transition_resources(
-                std::iter::empty(),
-                std::iter::once(wgpu::TextureTransition {
-                    texture: &**back_buffer,
-                    selector: None,
-                    state: wgpu::TextureUses::COLOR_TARGET,
-                }),
-            );
-        }
-
-        Ok(())
+/// Transition a recycled host texture before any camera renders into it.
+fn prepare_render_target(mut render_context: RenderContext, back_buffer: Res<BackBuffer>) {
+    if let Some(back_buffer) = &back_buffer.0 {
+        render_context.command_encoder().transition_resources(
+            std::iter::empty(),
+            std::iter::once(wgpu::TextureTransition {
+                texture: &**back_buffer,
+                selector: None,
+                state: wgpu::TextureUses::COLOR_TARGET,
+            }),
+        );
     }
 }
 
-/// Render graph node that sends the just-rendered texture back to the UI thread.
-#[derive(Default)]
-struct CanvasSwapChainDriver;
-
-impl render_graph::Node for CanvasSwapChainDriver {
-    fn run(
-        &self,
-        _graph: &mut RenderGraphContext,
-        _render_context: &mut RenderContext,
-        world: &bevy::ecs::world::World,
-    ) -> Result<(), NodeRunError> {
-        let ready_frame_sender = world.resource::<ReadyFrameSender>();
-        let back_buffer = world.resource::<BackBuffer>();
-
-        if let Some(back_buffer) = &back_buffer.0 {
-            ready_frame_sender.try_send(back_buffer.clone()).ok();
-        }
-
-        Ok(())
+/// Publish the texture only after Bevy has submitted this frame's command buffers.
+fn publish_render_target(ready_frame_sender: Res<ReadyFrameSender>, back_buffer: Res<BackBuffer>) {
+    if let Some(back_buffer) = &back_buffer.0 {
+        let _ = ready_frame_sender.try_send(back_buffer.clone());
     }
 }

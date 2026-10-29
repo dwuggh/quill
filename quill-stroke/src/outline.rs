@@ -358,13 +358,9 @@ impl SimpleStrokeOutline {
 
     fn simplify_contained_circles(&self, run: &[CircleSample]) -> Vec<CircleSample> {
         let mut samples = run.to_vec();
-        loop {
-            let Some(index) = removable_contained_circle(&samples, self.epsilon)
-                .or_else(|| invalid_tangent_pair_circle(&samples, self.epsilon))
-            else {
-                break;
-            };
-
+        while let Some(index) = removable_contained_circle(&samples, self.epsilon)
+            .or_else(|| invalid_tangent_pair_circle(&samples, self.epsilon))
+        {
             samples.remove(index);
             if samples.len() <= 1 {
                 break;

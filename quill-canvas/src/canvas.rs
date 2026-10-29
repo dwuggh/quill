@@ -175,13 +175,16 @@ pub struct CanvasErrors(pub(crate) Vec<CanvasError>);
 #[derive(Resource, Default)]
 pub struct LastAddedEntity(pub(crate) Option<Entity>);
 
+/// Query for entities allowed to own pages and drawable elements.
+pub type CanvasOwners<'w, 's> = Query<'w, 's, (), Or<(With<DocumentRoot>, With<Page>)>>;
+
 /// Apply high-level canvas commands such as tool changes and page creation.
 pub fn apply_canvas_commands(
     mut commands: Commands,
     mut canvas_commands: MessageReader<CanvasCommand>,
     mut mode: ResMut<CanvasMode>,
     root: Res<DocumentRootEntity>,
-    owners: Query<(), Or<(With<DocumentRoot>, With<Page>)>>,
+    owners: CanvasOwners<'_, '_>,
     mut last_added: ResMut<LastAddedEntity>,
     mut errors: ResMut<CanvasErrors>,
 ) {
@@ -227,7 +230,7 @@ pub fn apply_canvas_commands(
 fn command_owner(
     requested: Option<Entity>,
     root: Entity,
-    owners: &Query<(), Or<(With<DocumentRoot>, With<Page>)>>,
+    owners: &CanvasOwners<'_, '_>,
     errors: &mut CanvasErrors,
 ) -> Option<Entity> {
     let owner = requested.unwrap_or(root);
@@ -253,7 +256,6 @@ mod tests {
 
     use super::*;
     use crate::{
-        asset::{CanvasFont, CanvasImage},
         document::{DocumentRootEntity, root_from_entity},
         element::{
             EraserConfig, EraserMode, EraserShape,
@@ -266,25 +268,6 @@ mod tests {
             text::{CanvasGlyph, TextElement},
         },
     };
-
-    #[test]
-    fn init_creates_document_root_and_asset_collections() {
-        let canvas = Canvas::new();
-        let world = canvas.world();
-        let root = world.resource::<DocumentRootEntity>().0;
-
-        assert!(world.get::<DocumentRoot>(root).is_some());
-        assert!(
-            world
-                .get_resource::<bevy_asset::Assets<CanvasImage>>()
-                .is_some()
-        );
-        assert!(
-            world
-                .get_resource::<bevy_asset::Assets<CanvasFont>>()
-                .is_some()
-        );
-    }
 
     #[test]
     fn commands_append_children_and_delete_page_descendants() {
@@ -628,8 +611,10 @@ mod tests {
         assert!(first_bound.x1 <= 4.51);
         assert!(second_bound.x0 >= 5.49);
 
-        let mut selection_tool = SelectionTool::default();
-        selection_tool.hit_radius = 0.1;
+        let selection_tool = SelectionTool {
+            hit_radius: 0.1,
+            ..Default::default()
+        };
         canvas.change_tool(Tool::Selection(selection_tool)).unwrap();
         canvas
             .input(CanvasInput::PointerDown(

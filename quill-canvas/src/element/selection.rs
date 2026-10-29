@@ -299,6 +299,14 @@ pub(crate) fn install_selection_systems(schedule: &mut Schedule) {
     schedule.add_systems(process_selection_msg.in_set(QuillUpdateSet::ToolMessages));
 }
 
+/// Query for selectable leaf elements in the document.
+type Drawables<'w, 's> =
+    Query<'w, 's, (), Or<(With<StrokeData>, With<ImageElement>, With<TextElement>)>>;
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Bevy injects independent resource and component borrows into this system"
+)]
 pub(crate) fn process_selection_msg(
     mut commands: Commands,
     mut messages: MessageReader<SelectionMessage>,
@@ -310,7 +318,7 @@ pub(crate) fn process_selection_msg(
     parents: Query<(Option<&CanvasTransform>, Option<&ChildOf>)>,
     bounds: Query<&RectBound>,
     areas: Query<&SelectionArea>,
-    drawables: Query<(), Or<(With<StrokeData>, With<ImageElement>, With<TextElement>)>>,
+    drawables: Drawables<'_, '_>,
 ) {
     let Tool::Selection(tool) = mode.tool else {
         for _ in messages.read() {}
@@ -424,7 +432,7 @@ fn begin_drag_if_area_hit(
     position: Point,
     areas: &Query<&SelectionArea>,
     parents: &Query<(Option<&CanvasTransform>, Option<&ChildOf>)>,
-    drawables: &Query<(), Or<(With<StrokeData>, With<ImageElement>, With<TextElement>)>>,
+    drawables: &Drawables<'_, '_>,
 ) -> bool {
     if selection.selected.is_empty() {
         return false;
@@ -597,7 +605,7 @@ fn update_selection_area_for_gesture(
     pages: &Query<&Page>,
     parents: &Query<(Option<&CanvasTransform>, Option<&ChildOf>)>,
     bounds: &Query<&RectBound>,
-    drawables: &Query<(), Or<(With<StrokeData>, With<ImageElement>, With<TextElement>)>>,
+    drawables: &Drawables<'_, '_>,
 ) {
     let Some(gesture) = selection.gesture.as_ref() else {
         return;
@@ -630,6 +638,10 @@ fn update_selection_area_for_gesture(
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Selection finalization combines the gesture, hits, and owner-space bounds"
+)]
 fn finalize_selection_area(
     commands: &mut Commands,
     selection: &mut SelectionState,
@@ -731,6 +743,10 @@ fn input_to_vec2(input: Input) -> Point {
     Point::new(f64::from(input.x()), f64::from(input.y()))
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Selection traversal reads hierarchy, transforms, bounds, and drawable membership"
+)]
 fn hit_selection(
     owner: Entity,
     gesture: &SelectionGesture,
@@ -739,7 +755,7 @@ fn hit_selection(
     pages: &Query<&Page>,
     parents: &Query<(Option<&CanvasTransform>, Option<&ChildOf>)>,
     bounds: &Query<&RectBound>,
-    drawables: &Query<(), Or<(With<StrokeData>, With<ImageElement>, With<TextElement>)>>,
+    drawables: &Drawables<'_, '_>,
 ) -> Vec<Entity> {
     let mut candidates = Vec::new();
     collect_drawable_bounds(
@@ -794,7 +810,7 @@ fn collect_drawable_bounds(
     pages: &Query<&Page>,
     parents: &Query<(Option<&CanvasTransform>, Option<&ChildOf>)>,
     bounds: &Query<&RectBound>,
-    drawables: &Query<(), Or<(With<StrokeData>, With<ImageElement>, With<TextElement>)>>,
+    drawables: &Drawables<'_, '_>,
     out: &mut Vec<(Entity, RectBound)>,
 ) {
     let Ok(owner_children) = children.get(owner) else {

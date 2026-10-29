@@ -189,7 +189,7 @@ impl CanvasRenderer {
         let texture_device = device.clone();
         // Bevy's manual render creation needs both the adapter and adapter info
         // even though Slint already selected the device and queue for us.
-        let adapter = spin_on::spin_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        let adapter = future::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::default(),
             force_fallback_adapter: false,
             compatible_surface: None,

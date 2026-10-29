@@ -129,6 +129,10 @@ impl ActiveEraser {
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Bevy injects independent resource and component borrows into this system"
+)]
 pub(crate) fn process_eraser_msg(
     mut commands: Commands,
     mut messages: MessageReader<EraserMessage>,
@@ -213,6 +217,10 @@ impl ActiveEraser {
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Finalization coordinates scene queries, masks, and selection state"
+)]
 fn finalize_eraser(
     commands: &mut Commands,
     root: Entity,
@@ -417,6 +425,10 @@ fn commit_pixel_erases(
     commit_masks(commands, masks, appended);
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Replacement preserves owner order, selection, transform, and stroke metadata"
+)]
 fn replace_stroke_with_fragments(
     commands: &mut Commands,
     selection: &mut SelectionState,
@@ -676,7 +688,7 @@ fn segment_intersection_t(from: Point, to: Point, edge_from: Point, edge_to: Poi
     let offset = edge_from - from;
     let t = cross(offset, edge_delta) / denom;
     let u = cross(offset, delta) / denom;
-    (t >= -1.0e-6 && t <= 1.0 + 1.0e-6 && u >= -1.0e-6 && u <= 1.0 + 1.0e-6)
+    ((-1.0e-6..=1.0 + 1.0e-6).contains(&t) && (-1.0e-6..=1.0 + 1.0e-6).contains(&u))
         .then_some(t.clamp(0.0, 1.0))
 }
 
@@ -755,6 +767,10 @@ fn dot(a: Vec2, b: Vec2) -> f64 {
     a.x * b.x + a.y * b.y
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Hit testing requires separate queries for each supported drawable type"
+)]
 fn hit_drawable(
     owner: Entity,
     entity: Entity,

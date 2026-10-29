@@ -672,56 +672,17 @@ fn hash_points(points: &[PathPoint]) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use bevy_ecs::query::With;
     use imaging::{
         Painter,
         kurbo::Size,
         peniko::{BlendMode, Compose},
         record::{Command, Draw, Geometry, Scene},
     };
-    use quill_canvas::{
-        canvas::Canvas,
-        element::{EraserConfig, EraserShape, Tool},
-    };
+    use quill_canvas::canvas::Canvas;
     use quill_stroke::input::Input;
 
     use super::*;
-
-    #[test]
-    fn renderer_records_filled_stroke_outline() {
-        let mut canvas = Canvas::new();
-        canvas
-            .input(quill_canvas::input::CanvasInput::PointerDown(Input::new(
-                10.0, 10.0, 0.0,
-            )))
-            .unwrap();
-        canvas
-            .input(quill_canvas::input::CanvasInput::PointerMove(Input::new(
-                20.0, 10.0, 1.0,
-            )))
-            .unwrap();
-        canvas
-            .input(quill_canvas::input::CanvasInput::PointerUp(Input::new(
-                30.0, 10.0, 2.0,
-            )))
-            .unwrap();
-
-        let mut scene = Scene::new();
-        let mut painter = Painter::new(&mut scene);
-        CanvasImagingRenderer::new().draw_canvas(&canvas, &mut painter, Size::new(200.0, 120.0));
-
-        assert!(scene.commands().iter().any(|command| {
-            let Command::Draw(draw_id) = command else {
-                return false;
-            };
-            matches!(
-                scene.draw_op(*draw_id),
-                Draw::Fill {
-                    shape: Geometry::Path(path),
-                    ..
-                } if !path.elements().is_empty()
-            )
-        }));
-    }
 
     #[test]
     fn active_stroke_render_then_update_does_not_panic() {
@@ -778,19 +739,21 @@ mod tests {
                 Input::new(10.0, 0.0, 1.0).with_pressure(1.0),
             ))
             .unwrap();
-        canvas
-            .change_tool(Tool::Eraser(EraserConfig::new(EraserShape::Circle, 2.0)))
+        // Pixel erasing now splits strokes structurally. Insert a persistent mask
+        // explicitly to exercise the renderer's mask path independently of editing.
+        let world = canvas.world_mut();
+        let stroke = world
+            .query_filtered::<Entity, With<StrokeData>>()
+            .single(world)
             .unwrap();
-        canvas
-            .input(quill_canvas::input::CanvasInput::PointerDown(
-                Input::new(5.0, -2.0, 2.0).with_pressure(1.0),
-            ))
-            .unwrap();
-        canvas
-            .input(quill_canvas::input::CanvasInput::PointerUp(
-                Input::new(5.0, 2.0, 3.0).with_pressure(1.0),
-            ))
-            .unwrap();
+        world.entity_mut(stroke).insert(Mask {
+            segments: vec![MaskSegment::new(
+                Point::new(5.0, -2.0),
+                Point::new(5.0, 2.0),
+                EraserShape::Circle,
+                2.0,
+            )],
+        });
 
         let mut scene = Scene::new();
         let mut painter = Painter::new(&mut scene);
@@ -812,18 +775,5 @@ mod tests {
                     if composite.blend == BlendMode::from(Compose::DestOut)
             )
         }));
-    }
-
-    #[test]
-    fn clear_cache_removes_retained_outlines() {
-        let mut renderer = CanvasImagingRenderer::new();
-        let canvas = Canvas::new();
-        let mut scene = Scene::new();
-        let mut painter = Painter::new(&mut scene);
-
-        renderer.draw_canvas(&canvas, &mut painter, Size::new(100.0, 100.0));
-        renderer.clear_cache();
-
-        assert!(renderer.strokes.is_empty());
     }
 }

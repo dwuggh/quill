@@ -4,7 +4,6 @@ use bevy::{
     app::{App, Plugin},
     asset::{Assets, Handle},
     core_pipeline::core_2d::{CORE_2D_DEPTH_FORMAT, Transparent2d},
-    image::BevyDefault,
     math::{FloatOrd, Mat4, Vec4},
     prelude::{Commands, Component, Entity, Res, ResMut, Resource},
     render::{
@@ -115,14 +114,17 @@ impl From<BrushTip> for StrokeTipKind {
 pub struct StrokePipelineKey {
     tip: StrokeTipKind,
     msaa_samples: u32,
+    /// Attachment format used by this view, including HDR overrides.
+    target_format: TextureFormat,
 }
 
 impl StrokePipelineKey {
-    /// Build a key from the brush tip and current view MSAA sample count.
-    pub fn new(tip: BrushTip, msaa_samples: u32) -> Self {
+    /// Build a key from the brush tip and current view attachment settings.
+    pub fn new(tip: BrushTip, msaa_samples: u32, target_format: TextureFormat) -> Self {
         Self {
             tip: tip.into(),
             msaa_samples,
+            target_format,
         }
     }
 }
@@ -160,7 +162,7 @@ impl SpecializedRenderPipeline for StrokePipeline {
             fragment: Some(FragmentState {
                 shader: self.shader.clone(),
                 targets: vec![Some(ColorTargetState {
-                    format: TextureFormat::bevy_default(),
+                    format: key.target_format,
                     blend: Some(BlendState::ALPHA_BLENDING),
                     write_mask: ColorWrites::ALL,
                 })],
@@ -178,8 +180,8 @@ impl SpecializedRenderPipeline for StrokePipeline {
             },
             depth_stencil: Some(DepthStencilState {
                 format: CORE_2D_DEPTH_FORMAT,
-                depth_write_enabled: false,
-                depth_compare: CompareFunction::GreaterEqual,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(CompareFunction::GreaterEqual),
                 stencil: StencilState::default(),
                 bias: DepthBiasState::default(),
             }),
@@ -544,6 +546,10 @@ type OrderedStrokes<'w, 's> =
 type HierarchyTransforms<'w, 's> =
     Query<'w, 's, (Option<&'static CanvasTransform>, Option<&'static ChildOf>)>;
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Extraction borrows the main and render worlds independently"
+)]
 fn extract_strokes(
     mut commands: Commands,
     root: Extract<Res<DocumentRootEntity>>,
@@ -619,6 +625,10 @@ fn prepare_strokes(
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Bevy injects pipeline, phase, view, and stroke resources separately"
+)]
 fn queue_strokes(
     transparent_draw_functions: Res<DrawFunctions<Transparent2d>>,
     stroke_pipeline: Res<StrokePipeline>,
@@ -651,10 +661,12 @@ fn queue_strokes(
                 StrokePipelineKey {
                     tip: stroke.tip,
                     msaa_samples: msaa.samples(),
+                    target_format: view.target_format,
                 },
             );
 
-            transparent_phase.add(Transparent2d {
+            // These items are rebuilt each frame; retained items would survive erasure.
+            transparent_phase.add_transient(Transparent2d {
                 sort_key: FloatOrd(order as f32),
                 entity: (render_entity, *main_entity),
                 pipeline,

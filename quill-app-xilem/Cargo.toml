@@ -3,15 +3,39 @@ name = "quill-app-xilem"
 version.workspace = true
 edition.workspace = true
 
+[lib]
+crate-type = ["rlib", "cdylib"]
+
 [[bin]]
 name = "quill-xilem"
 path = "src/main.rs"
 
 [dependencies]
 bevy_ecs.workspace = true
+# Bevy's naga_oil enables codespan-reporting/termcolor for the whole workspace.
+# Naga 28 must use the matching writer when built alongside Bevy's Naga 29.
+naga = { version = "28.0.0", features = ["termcolor"] }
 quill-canvas = { path = "../quill-canvas" }
 quill-render-imaging = { path = "../quill-render-imaging" }
 quill_stroke = { path = "../quill-stroke" }
 tracing.workspace = true
 tracing-subscriber.workspace = true
-xilem = { path = "../../xilem/xilem", default-features = false, features = ["imaging_vello_hybrid"] }
+xilem.workspace = true
+
+[target.'cfg(target_os = "android")'.dependencies]
+# Feature unification enables NativeActivity on the same Winit used by Xilem.
+winit = { version = "=0.31.0-beta.4", features = ["android-native-activity"] }
+tracing-android = "0.2.0"
+
+[package.metadata.android]
+package = "dev.quill.app"
+apk_name = "quill"
+build_targets = ["aarch64-linux-android"]
+strip = "strip"
+
+[package.metadata.android.sdk]
+min_sdk_version = 26
+target_sdk_version = 35
+
+[package.metadata.android.application]
+label = "Quill"

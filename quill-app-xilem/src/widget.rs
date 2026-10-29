@@ -6,10 +6,12 @@ use quill_canvas::{
     document::root_from_entity,
     error::CanvasError,
     prelude::{
-        CanvasTransform, Page, PageConfig, SelectionArea, SelectionAreaShape, SelectionState, Tool,
+        CanvasInput, CanvasTransform, Page, PageConfig, SelectionArea, SelectionAreaShape,
+        SelectionState, Tool,
     },
 };
 use quill_render_imaging::CanvasImagingRenderer;
+use quill_stroke::input::Input as StrokeInput;
 use xilem::{
     Color, Pod, ViewCtx,
     core::{MessageCtx, MessageResult, Mut, View, ViewMarker},
@@ -17,7 +19,7 @@ use xilem::{
         accesskit::{Node, Role},
         core::{
             AccessCtx, AccessEvent, ChildrenIds, EventCtx, LayoutCtx, MeasureCtx, NoAction,
-            PaintCtx, PointerButton, PointerButtonEvent, PointerEvent, PointerUpdate,
+            PaintCtx, PointerButton, PointerButtonEvent, PointerEvent, PointerState, PointerUpdate,
             PropertiesMut, PropertiesRef, RegisterCtx, TextEvent, Widget, WidgetId, WidgetMut,
         },
         imaging::Painter,
@@ -25,8 +27,6 @@ use xilem::{
         layout::{LenReq, Length},
     },
 };
-
-use crate::{PointerInputKind, PointerSample};
 
 const DEFAULT_LENGTH: Length = Length::const_px(400.0);
 const PAGE_GAP: f64 = 48.0;
@@ -161,28 +161,16 @@ impl QuillCanvasWidget {
         this.ctx.request_render();
     }
 
-    fn send_input(&mut self, input: quill_canvas::prelude::CanvasInput) {
+    fn send_input(&mut self, input: CanvasInput) {
         if let Err(error) = self.canvas.input(input) {
             self.last_error = Some(error);
         }
     }
 
-    fn pointer_sample(
-        &self,
-        ctx: &EventCtx<'_>,
-        state: &xilem::masonry::core::PointerState,
-    ) -> PointerSample {
+    fn pointer_sample(&self, ctx: &EventCtx<'_>, state: &PointerState) -> PointerSample {
         let local = ctx.local_position(state.position);
         let root = self.viewport().root_from_widget(local);
-        PointerSample {
-            x: root.x,
-            y: root.y,
-            pressure: state.pressure.clamp(0.0, 1.0),
-            // pressure: 0.5,
-            tilt_x: state.orientation.altitude,
-            tilt_y: state.orientation.azimuth,
-            timestamp: self.start.elapsed().as_secs_f64(),
-        }
+        PointerSample::from_pointer(state, root, self.start.elapsed().as_secs_f64())
     }
 
     fn accept_sample(&mut self, sample: PointerSample, kind: PointerInputKind) {
@@ -225,7 +213,7 @@ impl QuillCanvasWidget {
             .filter_map(|entity| {
                 let page = world.get::<Page>(*entity)?;
                 let root_from_page = root_from_entity(world, *entity)?;
-                Some(transform_rect(root_from_page, page.rect()))
+                Some(root_from_page.transform_rect_bbox(page.rect()))
             })
             .reduce(|bounds, rect| bounds.union(rect))
     }
@@ -452,23 +440,7 @@ fn append_default_page(canvas: &mut Canvas, pages: &mut Vec<Entity>) -> Result<(
     Ok(())
 }
 
-fn transform_rect(transform: Affine, rect: Rect) -> Rect {
-    let corners = [
-        Point::new(rect.x0, rect.y0),
-        Point::new(rect.x0, rect.y1),
-        Point::new(rect.x1, rect.y0),
-        Point::new(rect.x1, rect.y1),
-    ];
-    let first = transform * corners[0];
-    corners[1..]
-        .iter()
-        .copied()
-        .map(|point| transform * point)
-        .fold(Rect::from_points(first, first), |bounds, point| {
-            bounds.union_pt(point)
-        })
-}
-
+/// Maps document coordinates into the centered, fitted widget viewport.
 #[derive(Clone, Copy, Debug)]
 struct Viewport {
     widget_from_root: Affine,
@@ -492,8 +464,7 @@ impl Viewport {
         let available_height = (widget_size.height - VIEWPORT_MARGIN * 2.0).max(1.0);
         let scale = (available_width / bounds.width())
             .min(available_height / bounds.height())
-            .min(1.0)
-            .max(0.01);
+            .clamp(0.01, 1.0);
         let scaled_width = bounds.width() * scale;
         let scaled_height = bounds.height() * scale;
         let tx = (widget_size.width - scaled_width) * 0.5 - bounds.x0 * scale;
@@ -515,6 +486,54 @@ impl Viewport {
     fn root_from_widget(self, point: Point) -> Point {
         self.widget_from_root.inverse() * point
     }
+}
+
+/// Pointer data converted from widget space into document coordinates.
+#[derive(Clone, Copy, Debug)]
+struct PointerSample {
+    x: f64,
+    y: f64,
+    pressure: f32,
+    tilt_x: f32,
+    tilt_y: f32,
+    timestamp: f64,
+}
+
+impl PointerSample {
+    /// Translate pointer metadata while keeping coordinates in document space.
+    fn from_pointer(state: &PointerState, position: Point, timestamp: f64) -> Self {
+        Self {
+            x: position.x,
+            y: position.y,
+            // The Winit adapter supplies native tablet pressure and handles devices
+            // without pressure support; the canvas must preserve that distinction.
+            pressure: state.pressure.clamp(0.0, 1.0),
+            tilt_x: state.orientation.altitude,
+            tilt_y: state.orientation.azimuth,
+            timestamp,
+        }
+    }
+
+    fn canvas_input(self, kind: PointerInputKind) -> CanvasInput {
+        match kind {
+            PointerInputKind::Move => CanvasInput::PointerMove(self.stroke_input()),
+            PointerInputKind::Down => CanvasInput::PointerDown(self.stroke_input()),
+            PointerInputKind::Up => CanvasInput::PointerUp(self.stroke_input()),
+        }
+    }
+
+    fn stroke_input(self) -> StrokeInput {
+        StrokeInput::new(self.x as f32, self.y as f32, self.timestamp)
+            .with_pressure(self.pressure)
+            .with_tilt(self.tilt_x, self.tilt_y)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum PointerInputKind {
+    Move,
+    Down,
+    Up,
 }
 
 #[cfg(test)]
