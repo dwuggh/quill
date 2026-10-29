@@ -4,10 +4,7 @@
 //! `quill-canvas`, converts stroke centerlines into filled CPU outlines from
 //! `quill-stroke`, and emits drawing commands into an `imaging::Painter`.
 
-use std::{
-    collections::{HashMap, HashSet},
-    hash::{Hash, Hasher},
-};
+use std::collections::{HashMap, HashSet};
 
 use bevy_asset::Assets;
 use bevy_ecs::{entity::Entity, hierarchy::Children, world::World};
@@ -26,14 +23,13 @@ use quill_canvas::{
         eraser::{ActiveEraser, Hidden, Mask, MaskSegment},
         image::ImageElement,
         page::{Page, PageBackground, PageBackgroundItem},
-        stroke::{StrokeData, StrokeStatus},
+        stroke::StrokeData,
         text::TextElement,
     },
     geom::CanvasTransform,
 };
 use quill_stroke::{
     brush::BrushTip,
-    input::{ModelUpdate, ModelUpdateMeta, PathPoint},
     outline::{SimpleStrokeOutline, StrokeOutlineOptions},
 };
 
@@ -480,9 +476,6 @@ impl Default for CanvasImagingRenderer {
 struct CachedStroke {
     outline: SimpleStrokeOutline,
     tip: BrushTip,
-    point_len: usize,
-    point_hash: u64,
-    was_active: bool,
 }
 
 impl CachedStroke {
@@ -491,45 +484,19 @@ impl CachedStroke {
         Self {
             outline: outline_from_stroke(stroke, tip, options),
             tip,
-            point_len: stroke.points.len(),
-            point_hash: hash_points(&stroke.points),
-            was_active: matches!(stroke.status, StrokeStatus::Active { .. }),
         }
     }
 
     fn sync(&mut self, stroke: &StrokeData, options: StrokeOutlineOptions) {
         let tip = stroke.brush.brush.tip;
-        let point_len = stroke.points.len();
-        let point_hash = hash_points(&stroke.points);
-        let is_active = matches!(stroke.status, StrokeStatus::Active { .. });
-
-        if self.tip == tip && self.point_len == point_len && self.point_hash == point_hash {
-            self.was_active = is_active;
-            return;
-        }
-
-        if self.tip == tip
-            && self.was_active
-            && let StrokeStatus::Active { last_update } = stroke.status
-            && last_update.invalidated_from <= self.point_len
-            && last_update.invalidated_from <= stroke.points.len()
-        {
-            let metadata = ModelUpdateMeta {
-                invalidated_from: last_update.invalidated_from,
-                stable_len: last_update.stable_len.min(stroke.points.len()),
-            };
-            self.outline.update(ModelUpdate {
-                metadata,
-                updated: &stroke.points[last_update.invalidated_from..],
-            });
-        } else {
+        if self.tip != tip {
             self.outline = outline_from_stroke(stroke, tip, options);
+            self.tip = tip;
+        } else {
+            // Rendering can skip several modeler updates. Compare the complete
+            // current path so the earliest unseen change is always invalidated.
+            self.outline.sync_path(&stroke.points);
         }
-
-        self.tip = tip;
-        self.point_len = point_len;
-        self.point_hash = point_hash;
-        self.was_active = is_active;
     }
 }
 
@@ -636,38 +603,11 @@ fn outline_from_stroke(
     tip: BrushTip,
     options: StrokeOutlineOptions,
 ) -> SimpleStrokeOutline {
-    match stroke.status {
-        StrokeStatus::Active { last_update } => {
-            let mut outline = SimpleStrokeOutline::new(tip, options);
-            outline.update(ModelUpdate {
-                metadata: ModelUpdateMeta {
-                    invalidated_from: 0,
-                    stable_len: last_update.stable_len.min(stroke.points.len()),
-                },
-                updated: &stroke.points,
-            });
-            outline
-        }
-        StrokeStatus::Finished => SimpleStrokeOutline::new_with_path(&stroke.points, tip, options),
-    }
+    SimpleStrokeOutline::new_with_path(&stroke.points, tip, options)
 }
 
 fn path_from_outline(outline: &SimpleStrokeOutline) -> BezPath {
     BezPath::from_vec(outline.iter().collect())
-}
-
-fn hash_points(points: &[PathPoint]) -> u64 {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    for point in points.iter().copied() {
-        point.x().to_bits().hash(&mut hasher);
-        point.y().to_bits().hash(&mut hasher);
-        point.pressure().to_bits().hash(&mut hasher);
-        point.altitude().to_bits().hash(&mut hasher);
-        point.azimuth().to_bits().hash(&mut hasher);
-        point.t().to_bits().hash(&mut hasher);
-        point.is_visible().hash(&mut hasher);
-    }
-    hasher.finish()
 }
 
 #[cfg(test)]

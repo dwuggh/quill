@@ -1,3 +1,4 @@
+use peniko::kurbo::Point;
 use smallvec::SmallVec;
 
 use super::{Input, InputModelError, InputModeler, InputSource, ModelUpdate, PathPoint};
@@ -10,6 +11,8 @@ pub struct WillInputModelerConfig {
     pub smoothing_alpha: f32,
     pub smoothing_beta: f32,
     pub interpolation_spacing: f32,
+    /// Number of trailing real inputs kept provisional. The spline always
+    /// needs at least one real control point beyond a committed segment.
     pub stable_lookahead: usize,
 }
 
@@ -97,7 +100,9 @@ impl InputCursor {
     }
 
     fn new_first_unstable_input(&self, stable_lookahead: usize) -> usize {
-        self.predicted_start.saturating_sub(stable_lookahead)
+        self.predicted_start
+            .saturating_sub(stable_lookahead.max(1))
+            .max(usize::from(self.predicted_start > 0))
     }
 
     fn compact(&mut self) {
@@ -121,6 +126,9 @@ struct SmoothingState {
 #[derive(Clone, Debug, Default)]
 struct Smoother {
     committed: Option<SmoothingState>,
+    /// Smoothed controls preceding the first provisional input. Their knot
+    /// values survive compaction so rebuilding a suffix preserves its tangent.
+    anchors: SmallVec<[PathPoint; SPLINE_LOOKBACK]>,
 }
 
 impl Smoother {
@@ -138,10 +146,11 @@ impl Smoother {
             let raw = input.to_path_point();
             let next_state = match state {
                 Some(previous) => {
-                    let level =
+                    let mut level =
                         previous
                             .level
                             .smoothed_toward(raw, previous.trend, config.smoothing_alpha);
+                    level.t = previous.level.t + previous.level.distance_to(level).sqrt();
                     let trend = level.smoothed_trend_from(
                         previous.level,
                         previous.trend,
@@ -164,23 +173,38 @@ impl Smoother {
         }
 
         SmoothedSuffix {
-            anchor: self.committed.map(|state| SmoothedPoint {
-                point: state.level,
-                input_index: first_input_index.saturating_sub(1),
-            }),
+            anchors: self
+                .anchors
+                .iter()
+                .copied()
+                .enumerate()
+                .map(|(offset, point)| SmoothedPoint {
+                    point,
+                    input_index: first_input_index - self.anchors.len() + offset,
+                })
+                .collect(),
             points,
             states,
         }
     }
 
-    fn commit(&mut self, state: Option<SmoothingState>) {
-        self.committed = state;
+    fn commit(&mut self, smoothed: &SmoothedSuffix, processed_count: usize) {
+        if let Some(state) = smoothed.state_after(processed_count) {
+            self.committed = Some(state);
+            self.anchors.extend(
+                smoothed.points[..processed_count]
+                    .iter()
+                    .map(|sample| sample.point),
+            );
+            let discard = self.anchors.len().saturating_sub(SPLINE_LOOKBACK);
+            self.anchors.drain(..discard);
+        }
     }
 }
 
 #[derive(Clone, Debug)]
 struct SmoothedSuffix {
-    anchor: Option<SmoothedPoint>,
+    anchors: SmallVec<[SmoothedPoint; SPLINE_LOOKBACK]>,
     points: Vec<SmoothedPoint>,
     states: Vec<SmoothingState>,
 }
@@ -192,9 +216,9 @@ impl SmoothedSuffix {
             .and_then(|index| self.states.get(index).copied())
     }
 
-    fn with_anchor(&self) -> Vec<SmoothedPoint> {
-        let mut points = Vec::with_capacity(self.points.len() + usize::from(self.anchor.is_some()));
-        points.extend(self.anchor);
+    fn with_anchors(&self) -> Vec<SmoothedPoint> {
+        let mut points = Vec::with_capacity(self.points.len() + self.anchors.len());
+        points.extend_from_slice(&self.anchors);
         points.extend_from_slice(&self.points);
         points
     }
@@ -236,7 +260,7 @@ impl WillInputModeler {
         self.inputs.validate_enqueue(points, predicted)
     }
 
-    fn rebuild_unstable_path(&mut self, stable_seed: Option<PathPoint>) {
+    fn rebuild_unstable_path(&mut self) {
         let first_unstable_input = self.inputs.first_unstable_input;
         let smoothed = self.smoother.smooth(
             &self.inputs.cached_inputs[first_unstable_input..],
@@ -247,29 +271,23 @@ impl WillInputModeler {
             .inputs
             .new_first_unstable_input(self.config.stable_lookahead);
 
-        let emitted =
-            PathBuilder::new(self.config).interpolate(&smoothed.with_anchor(), stable_seed);
-        let stable_extension = emitted
-            .iter()
-            .take_while(|sample| sample.input_index < new_first_unstable_input)
-            .count();
-
+        let emitted = PathBuilder::new(self.config)
+            .interpolate(&smoothed.with_anchors(), first_unstable_input);
         for sample in emitted {
-            self.push_path_point(sample.point);
+            // A discarded duplicate occupies no path slot. Count only emitted
+            // samples whose complete four-control dependency is real and final.
+            if self.push_path_point(sample.point) && sample.input_index < new_first_unstable_input {
+                self.stable_len += 1;
+            }
         }
 
         let processed_stable = new_first_unstable_input.saturating_sub(first_unstable_input);
-        let committed_state = smoothed
-            .state_after(processed_stable)
-            .or(self.smoother.committed);
-
-        self.smoother.commit(committed_state);
+        self.smoother.commit(&smoothed, processed_stable);
         self.inputs.first_unstable_input = new_first_unstable_input;
-        self.stable_len = (self.stable_len + stable_extension).min(self.path.len());
         self.inputs.compact();
     }
 
-    fn push_path_point(&mut self, point: PathPoint) {
+    fn push_path_point(&mut self, point: PathPoint) -> bool {
         if point.is_finite()
             && self
                 .path
@@ -277,7 +295,9 @@ impl WillInputModeler {
                 .is_none_or(|last| last.distance_to(point) > EPSILON)
         {
             self.path.push(point);
+            return true;
         }
+        false
     }
 }
 
@@ -298,9 +318,8 @@ impl InputModeler for WillInputModeler {
 
         let invalidated_from = self.stable_len;
         self.path.truncate(self.stable_len);
-        let stable_seed = self.path.last().copied();
         self.inputs.replace_prediction(points, predicted);
-        self.rebuild_unstable_path(stable_seed);
+        self.rebuild_unstable_path();
 
         Ok(ModelUpdate {
             metadata: super::ModelUpdateMeta {
@@ -481,45 +500,29 @@ impl PathBuilder {
         Self { config }
     }
 
-    fn interpolate(self, points: &[SmoothedPoint], seed: Option<PathPoint>) -> Vec<ModeledSample> {
-        let points = self.parameterize(points, seed);
-        match points.len() {
-            0 => Vec::new(),
-            1 | 2 => points.iter().copied().map(ModeledSample::from).collect(),
-            _ => self.interpolate_spline(&points),
-        }
-    }
-
-    fn parameterize(self, points: &[SmoothedPoint], seed: Option<PathPoint>) -> Vec<SmoothedPoint> {
-        let mut parameterized = Vec::with_capacity(points.len());
-        let mut previous = seed;
-        let mut t = seed.map_or(0.0, |point| point.t);
-
-        for point in points.iter().copied() {
-            let mut next = point.point;
-            if let Some(previous) = previous {
-                t += previous.distance_to(next).sqrt();
-            }
-            next.t = t;
-            parameterized.push(SmoothedPoint {
-                point: next,
-                input_index: point.input_index,
-            });
-            previous = Some(next);
+    /// Rebuild only segments ending in provisional inputs. Earlier controls
+    /// supply the incoming tangent but must never be emitted a second time.
+    fn interpolate(
+        self,
+        points: &[SmoothedPoint],
+        first_unstable_input: usize,
+    ) -> Vec<ModeledSample> {
+        let mut output = Vec::new();
+        let Some(first) = points.first().copied() else {
+            return output;
+        };
+        if first.input_index >= first_unstable_input {
+            output.push(first.into());
         }
 
-        parameterized
-    }
-
-    fn interpolate_spline(self, points: &[SmoothedPoint]) -> Vec<ModeledSample> {
-        let mut output = Vec::with_capacity(points.len());
-        output.push(points[0].into());
-
-        for i in 0..points.len() - 1 {
+        for i in 0..points.len().saturating_sub(1) {
             let p0 = if i == 0 { points[i] } else { points[i - 1] };
             let p1 = points[i];
             let p2 = points[i + 1];
             let p3 = points.get(i + 2).copied().unwrap_or(p2);
+            if p2.input_index < first_unstable_input {
+                continue;
+            }
 
             let distance = p1.point.distance_to(p2.point);
             if distance <= EPSILON {
@@ -539,10 +542,11 @@ impl PathBuilder {
                 );
             }
         }
-
         output
     }
 
+    /// Evaluate geometry with unclamped Barry–Goldman interpolation. Sensor
+    /// values use the segment fraction, not extrapolated intermediate values.
     fn centripetal_catmull_rom(
         self,
         p0: PathPoint,
@@ -551,42 +555,51 @@ impl PathBuilder {
         p3: PathPoint,
         t: f32,
     ) -> PathPoint {
-        let t0 = p0.t;
-        let t1 = p1.t;
-        let t2 = p2.t;
-        let t3 = p3.t;
-
-        if (t2 - t1).abs() <= EPSILON {
-            let mut point = p1.lerp(p2, t);
-            point.t = t1 + (t2 - t1) * t;
+        // Emit the exact endpoint so the next segment shares the same sample.
+        if t >= 1.0 {
+            let mut endpoint = p2;
+            endpoint.pressure = endpoint.pressure.clamp(0.0, 1.0);
+            return endpoint;
+        }
+        let mut point = p1.lerp(p2, t);
+        let mut q0 = Point::new(f64::from(p0.x), f64::from(p0.y));
+        let q1 = Point::new(f64::from(p1.x), f64::from(p1.y));
+        let q2 = Point::new(f64::from(p2.x), f64::from(p2.y));
+        let mut q3 = Point::new(f64::from(p3.x), f64::from(p3.y));
+        if q1.distance(q2) <= f64::from(EPSILON) {
             return point;
         }
 
-        let u = t1 + (t2 - t1) * t;
-        let a1 = self.interpolate_between_knots(p0, p1, t0, t1, u);
-        let a2 = self.interpolate_between_knots(p1, p2, t1, t2, u);
-        let a3 = self.interpolate_between_knots(p2, p3, t2, t3, u);
-        let b1 = self.interpolate_between_knots(a1, a2, t0, t2, u);
-        let b2 = self.interpolate_between_knots(a2, a3, t1, t3, u);
-        let mut point = self.interpolate_between_knots(b1, b2, t1, t2, u);
-        point.t = u;
+        // Reflect missing or coincident outer controls to obtain one-sided
+        // endpoint tangents without zero knot intervals. A provisional end
+        // control is replaced as soon as another input arrives.
+        if q0.distance(q1) <= f64::from(EPSILON) {
+            q0 = q1 + (q1 - q2);
+        }
+        if q2.distance(q3) <= f64::from(EPSILON) {
+            q3 = q2 + (q2 - q1);
+        }
+
+        // Local f64 knots avoid subtracting nearly equal accumulated f32 t's
+        // after a long stroke. PathPoint::t still records the global parameter.
+        let t0 = 0.0;
+        let t1 = q0.distance(q1).sqrt();
+        let t2 = t1 + q1.distance(q2).sqrt();
+        let t3 = t2 + q2.distance(q3).sqrt();
+        let u = t1 + (t2 - t1) * f64::from(t);
+        let a1 = Self::interpolate_between_knots(q0, q1, t0, t1, u);
+        let a2 = Self::interpolate_between_knots(q1, q2, t1, t2, u);
+        let a3 = Self::interpolate_between_knots(q2, q3, t2, t3, u);
+        let b1 = Self::interpolate_between_knots(a1, a2, t0, t2, u);
+        let b2 = Self::interpolate_between_knots(a2, a3, t1, t3, u);
+        let position = Self::interpolate_between_knots(b1, b2, t1, t2, u);
+        point.x = position.x as f32;
+        point.y = position.y as f32;
         point
     }
 
-    fn interpolate_between_knots(
-        self,
-        a: PathPoint,
-        b: PathPoint,
-        start: f32,
-        end: f32,
-        value: f32,
-    ) -> PathPoint {
-        if (end - start).abs() <= EPSILON {
-            return a;
-        }
-
-        let t = ((value - start) / (end - start)).clamp(0.0, 1.0);
-        a.lerp(b, t)
+    fn interpolate_between_knots(a: Point, b: Point, start: f64, end: f64, value: f64) -> Point {
+        a + (b - a) * ((value - start) / (end - start))
     }
 
     fn push_distinct(output: &mut Vec<ModeledSample>, sample: ModeledSample) {

@@ -11,7 +11,6 @@ use std::{
 };
 
 use peniko::kurbo::{BezPath, PathEl, Point, Vec2};
-use smallvec::SmallVec;
 
 use crate::{
     brush::BrushTip,
@@ -19,8 +18,6 @@ use crate::{
 };
 
 const DEFAULT_EPSILON: f64 = 1.0e-5;
-const CACHED_POINT_INLINE_CAPACITY: usize = 8;
-const GEOMETRY_LOOKBACK_POINTS: usize = 2;
 
 type UpperIter<'a> = Copied<slice::Iter<'a, PathEl>>;
 type LowerIter<'a> = Copied<Rev<slice::Iter<'a, PathEl>>>;
@@ -84,14 +81,11 @@ pub struct SimpleStrokeOutline {
     upper: BezPath,
     /// Lower side commands in source order. Iteration reads this in reverse.
     lower: Vec<PathEl>,
-    /// Truncate `upper` from this element before rebuilding the cached window.
-    upper_instable_index: usize,
-    /// Truncate `lower` from this element before rebuilding the cached window.
-    lower_instable_index: usize,
-    /// Source index of `cached_points[0]`.
-    cached_start: usize,
-    /// Stable lookback plus the unstable suffix from the input model.
-    cached_points: SmallVec<[PathPoint; CACHED_POINT_INLINE_CAPACITY]>,
+    /// Full modeled source retained so containment changes can roll back past
+    /// any previously simplified circle, including across the stable boundary.
+    points: Vec<PathPoint>,
+    /// Each visible run owns checkpoints before its joins and final cap.
+    runs: Vec<RunOutline>,
 }
 
 impl StrokeOutline for SimpleStrokeOutline {
@@ -122,10 +116,8 @@ impl SimpleStrokeOutline {
             epsilon: finite_positive(options.epsilon).unwrap_or(DEFAULT_EPSILON),
             upper: BezPath::new(),
             lower: Vec::new(),
-            upper_instable_index: 0,
-            lower_instable_index: 0,
-            cached_start: 0,
-            cached_points: SmallVec::new(),
+            points: Vec::new(),
+            runs: Vec::new(),
         }
     }
 
@@ -146,26 +138,39 @@ impl SimpleStrokeOutline {
         outline
     }
 
-    /// Replace the invalidated source suffix and incrementally rebuild outline paths.
+    /// Replace an invalidated source suffix and rebuild the affected geometry.
+    ///
+    /// A stable input prefix does not imply stable outline geometry: a later
+    /// larger circle can contain earlier circles and change their tangents.
     pub fn update(&mut self, data: ModelUpdate<'_>) {
-        debug_assert!(
-            data.metadata.invalidated_from >= self.cached_start,
-            "SimpleStrokeOutline only caches the unstable tail"
+        assert!(
+            data.metadata.invalidated_from <= self.points.len(),
+            "outline updates must not skip source samples"
         );
+        self.points.truncate(data.metadata.invalidated_from);
+        self.points.extend_from_slice(data.updated);
+        self.rebuild_runs();
+    }
 
-        let keep = data
-            .metadata
-            .invalidated_from
-            .saturating_sub(self.cached_start)
-            .min(self.cached_points.len());
-
-        self.cached_points.truncate(keep);
-        self.cached_points.extend_from_slice(data.updated);
-        self.upper.truncate(self.upper_instable_index);
-        self.lower.truncate(self.lower_instable_index);
-
-        self.rebuild_cached_window(data.metadata.stable_len);
-        self.drop_committed_cached_points(data.metadata.stable_len);
+    /// Synchronize with a complete path, including updates skipped between
+    /// paints. Only the differing suffix replaces the retained source points.
+    pub fn sync_path(&mut self, points: &[PathPoint]) {
+        let common = self
+            .points
+            .iter()
+            .zip(points)
+            .take_while(|(a, b)| a == b)
+            .count();
+        if common == self.points.len() && common == points.len() {
+            return;
+        }
+        self.update(ModelUpdate {
+            metadata: ModelUpdateMeta {
+                invalidated_from: common,
+                stable_len: 0,
+            },
+            updated: &points[common..],
+        });
     }
 
     /// Iterate the filled outline as upper elements followed by reversed lower elements.
@@ -190,126 +195,124 @@ impl SimpleStrokeOutline {
         &self.lower
     }
 
-    fn rebuild_cached_window(&mut self, stable_len: usize) {
-        let marker_source = stable_len.saturating_sub(GEOMETRY_LOOKBACK_POINTS);
-        let mut markers = RebuildMarkers::default();
-        let mut run_start = None;
-        let mut samples = Vec::new();
-
-        for offset in 0..self.cached_points.len() {
-            let point = self.cached_points[offset];
-            let source_index = self.cached_start + offset;
+    /// Reconcile visible runs with their retained geometry. Circle identities
+    /// survive simplification, so a rollback is based on actual dependencies.
+    fn rebuild_runs(&mut self) {
+        let mut source_runs = Vec::new();
+        let mut run = Vec::new();
+        for (source_index, point) in self.points.iter().copied().enumerate() {
             if let Some(sample) = CircleSample::from_path_point(point, self.tip, source_index) {
-                run_start.get_or_insert(source_index);
-                samples.push(sample);
-                continue;
-            }
-
-            if let Some(start) = run_start.take() {
-                self.append_run_outline(start, &samples, marker_source, &mut markers);
-                self.finish_open_contour();
-                samples.clear();
+                run.push(sample);
+            } else if !run.is_empty() {
+                source_runs.push(std::mem::take(&mut run));
             }
         }
-
-        if let Some(start) = run_start {
-            self.append_run_outline(start, &samples, marker_source, &mut markers);
+        if !run.is_empty() {
+            source_runs.push(run);
+        }
+        // Preserve the existing single-point policy; this cache handles runs
+        // with segments and circles produced by containment simplification.
+        source_runs.retain(|run| run.len() >= 2);
+        self.runs
+            .resize_with(source_runs.len(), RunOutline::default);
+        for (cached, source) in self.runs.iter_mut().zip(source_runs) {
+            cached.sync(&source, self.epsilon);
         }
 
-        self.upper_instable_index = markers.upper.unwrap_or_else(|| self.upper.elements().len());
-        self.lower_instable_index = markers.lower.unwrap_or(self.lower.len());
+        self.upper.truncate(0);
+        self.lower.clear();
+        if let Some((last, completed)) = self.runs.split_last() {
+            for run in completed {
+                self.upper.extend(run.upper.elements().iter().copied());
+                self.upper.extend(run.lower.iter().rev().copied());
+            }
+            self.upper.extend(last.upper.elements().iter().copied());
+            self.lower.extend_from_slice(&last.lower);
+        }
     }
+}
 
-    fn append_run_outline(
-        &mut self,
-        source_start: usize,
-        run: &[CircleSample],
-        marker_source: usize,
-        markers: &mut RebuildMarkers,
-    ) {
-        if run.len() < 2 {
+/// Geometry for one visible run. Checkpoint i precedes the join and segment
+/// starting at circle i; the final checkpoint precedes the replaceable end cap.
+#[derive(Clone, Debug, Default)]
+struct RunOutline {
+    samples: Vec<CircleSample>,
+    upper: BezPath,
+    lower: Vec<PathEl>,
+    checkpoints: Vec<OutlineCheckpoint>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct OutlineCheckpoint {
+    upper: usize,
+    lower: usize,
+}
+
+impl RunOutline {
+    fn sync(&mut self, source: &[CircleSample], epsilon: f64) {
+        let samples = Self::simplified_samples(source, epsilon);
+        if self.samples == samples {
             return;
         }
-
-        if all_centers_coincident(run, self.epsilon) {
-            self.finish_open_contour();
-            append_circle(
-                &mut self.upper,
-                run[0].center,
-                max_radius(run),
-                self.epsilon,
-            );
-            return;
-        }
-
-        let samples = self.simplify_contained_circles(run);
-        if samples.len() < 2 {
-            self.finish_open_contour();
-            append_circle(
-                &mut self.upper,
-                samples[0].center,
-                samples[0].radius,
-                self.epsilon,
-            );
-            return;
-        }
-
-        let Some(tangents) = self.segment_tangents(&samples) else {
-            self.finish_open_contour();
+        let tangents = samples
+            .windows(2)
+            .map(|pair| tangent_pair(pair[0], pair[1], epsilon))
+            .collect::<Option<Vec<_>>>();
+        let Some(tangents) = tangents.filter(|tangents| !tangents.is_empty()) else {
+            self.upper.truncate(0);
+            self.lower.clear();
+            self.checkpoints.clear();
             let circle = largest_circle(&samples);
-            append_circle(&mut self.upper, circle.center, circle.radius, self.epsilon);
+            append_circle(&mut self.upper, circle.center, circle.radius, epsilon);
+            self.samples = samples;
             return;
         };
 
-        self.append_tangent_run(source_start, &samples, &tangents, marker_source, markers);
-    }
+        let common = self
+            .samples
+            .iter()
+            .zip(&samples)
+            .take_while(|(a, b)| a == b)
+            .count();
+        // A changed circle also changes the preceding segment and its start
+        // join. Containment can move this boundary arbitrarily far backward.
+        let rebuild_from = common.saturating_sub(1).min(tangents.len());
+        let rebuild_from = if let Some(checkpoint) = self.checkpoints.get(rebuild_from) {
+            self.upper.truncate(checkpoint.upper);
+            self.lower.truncate(checkpoint.lower);
+            self.checkpoints.truncate(rebuild_from);
+            rebuild_from
+        } else {
+            self.upper.truncate(0);
+            self.lower.clear();
+            self.checkpoints.clear();
+            0
+        };
 
-    fn append_tangent_run(
-        &mut self,
-        source_start: usize,
-        samples: &[CircleSample],
-        tangents: &[SegmentTangents],
-        marker_source: usize,
-        markers: &mut RebuildMarkers,
-    ) {
-        let continuation = source_start == self.cached_start && self.cached_start > 0;
-        let first = tangents[0];
-
-        if !continuation && source_start == marker_source {
-            markers.mark(self.upper.elements().len(), self.lower.len());
-        }
-
-        if !continuation {
-            self.finish_open_contour();
-            self.upper.move_to(first.right_start);
-            self.ensure_lower_close_path();
-            append_clockwise_arc(
-                &mut self.upper,
-                samples[0].center,
-                samples[0].radius,
-                first.right_start,
-                first.left_start,
-                self.epsilon,
-            );
-        }
-
-        for (segment_index, tangent) in tangents.iter().enumerate() {
-            let segment_source = source_start + segment_index;
-            if continuation && segment_source == marker_source {
-                markers.mark(self.upper.elements().len(), self.lower.len());
-            }
-
-            if segment_index > 0 {
+        for segment_index in rebuild_from..tangents.len() {
+            self.checkpoints.push(self.checkpoint());
+            let tangent = tangents[segment_index];
+            if segment_index == 0 {
+                self.upper.move_to(tangent.right_start);
+                self.lower.push(PathEl::ClosePath);
+                append_clockwise_arc(
+                    &mut self.upper,
+                    samples[0].center,
+                    samples[0].radius,
+                    tangent.right_start,
+                    tangent.left_start,
+                    epsilon,
+                );
+            } else {
                 let sample = samples[segment_index];
                 let previous = tangents[segment_index - 1];
-                append_upper_join(&mut self.upper, sample, previous, *tangent, self.epsilon);
-                append_lower_join(&mut self.lower, sample, previous, *tangent, self.epsilon);
+                append_upper_join(&mut self.upper, sample, previous, tangent, epsilon);
+                append_lower_join(&mut self.lower, sample, previous, tangent, epsilon);
             }
-
             self.upper.line_to(tangent.left_end);
             self.lower.push(PathEl::LineTo(tangent.right_start));
         }
-
+        self.checkpoints.push(self.checkpoint());
         let end = samples[samples.len() - 1];
         let last = tangents[tangents.len() - 1];
         append_clockwise_arc(
@@ -318,80 +321,50 @@ impl SimpleStrokeOutline {
             end.radius,
             last.left_end,
             last.right_end,
-            self.epsilon,
+            epsilon,
         );
+        self.samples = samples;
     }
 
-    fn finish_open_contour(&mut self) {
-        if self.lower.is_empty() {
-            return;
-        }
-
-        self.upper.extend(self.lower.iter().rev().copied());
-        self.lower.clear();
-    }
-
-    fn ensure_lower_close_path(&mut self) {
-        if self.lower.is_empty() {
-            self.lower.push(PathEl::ClosePath);
+    fn checkpoint(&self) -> OutlineCheckpoint {
+        OutlineCheckpoint {
+            upper: self.upper.elements().len(),
+            lower: self.lower.len(),
         }
     }
 
-    fn drop_committed_cached_points(&mut self, stable_len: usize) {
-        let next_cached_start = stable_len.saturating_sub(GEOMETRY_LOOKBACK_POINTS);
-        let drain_len = next_cached_start
-            .saturating_sub(self.cached_start)
-            .min(self.cached_points.len());
-
-        if drain_len > 0 {
-            self.cached_points.drain(..drain_len);
-            self.cached_start += drain_len;
+    /// Re-evaluate containment against the complete run. Keeping source indices
+    /// lets the geometry cache find a safe prefix even when several circles vanish.
+    fn simplified_samples(run: &[CircleSample], epsilon: f64) -> Vec<CircleSample> {
+        if all_centers_coincident(run, epsilon) {
+            return vec![CircleSample {
+                radius: max_radius(run),
+                ..run[0]
+            }];
         }
-    }
-
-    fn segment_tangents(&self, samples: &[CircleSample]) -> Option<Vec<SegmentTangents>> {
-        samples
-            .windows(2)
-            .map(|pair| tangent_pair(pair[0], pair[1], self.epsilon))
-            .collect()
-    }
-
-    fn simplify_contained_circles(&self, run: &[CircleSample]) -> Vec<CircleSample> {
         let mut samples = run.to_vec();
-        while let Some(index) = removable_contained_circle(&samples, self.epsilon)
-            .or_else(|| invalid_tangent_pair_circle(&samples, self.epsilon))
+        while let Some(index) = removable_contained_circle(&samples, epsilon)
+            .or_else(|| invalid_tangent_pair_circle(&samples, epsilon))
         {
             samples.remove(index);
             if samples.len() <= 1 {
                 break;
             }
         }
-
         samples
     }
 }
 
-#[derive(Clone, Copy, Debug, Default)]
-struct RebuildMarkers {
-    upper: Option<usize>,
-    lower: Option<usize>,
-}
-
-impl RebuildMarkers {
-    fn mark(&mut self, upper: usize, lower: usize) {
-        self.upper.get_or_insert(upper);
-        self.lower.get_or_insert(lower);
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 struct CircleSample {
+    /// Original modeled point, retained through circle simplification.
+    source_index: usize,
     center: Point,
     radius: f64,
 }
 
 impl CircleSample {
-    fn from_path_point(point: PathPoint, tip: BrushTip, _source_index: usize) -> Option<Self> {
+    fn from_path_point(point: PathPoint, tip: BrushTip, source_index: usize) -> Option<Self> {
         if !point.is_visible() {
             return None;
         }
@@ -405,7 +378,11 @@ impl CircleSample {
             BrushTip::Round(tip) => f64::from(tip.radius.0) * f64::from(point.pressure().max(0.0)),
             BrushTip::FixedRound(tip) => f64::from(tip.radius.0),
         };
-        finite_non_negative(radius).map(|radius| Self { center, radius })
+        finite_non_negative(radius).map(|radius| Self {
+            source_index,
+            center,
+            radius,
+        })
     }
 
     fn contains(self, other: Self, epsilon: f64) -> bool {
@@ -813,6 +790,7 @@ fn largest_circle(run: &[CircleSample]) -> CircleSample {
         .copied()
         .max_by(|a, b| a.radius.total_cmp(&b.radius))
         .unwrap_or(CircleSample {
+            source_index: 0,
             center: Point::ZERO,
             radius: 0.0,
         })
@@ -975,24 +953,6 @@ mod tests {
         let incremental: BezPath = outline.iter().collect();
         let fresh = path(&final_points, BrushTip::FixedRound(RoundTip::new(2.0)));
         assert_eq!(incremental, fresh);
-    }
-
-    #[test]
-    fn cached_points_keep_small_stable_lookback() {
-        let points = [
-            point(0.0, 0.0, 1.0),
-            point(10.0, 0.0, 1.0),
-            point(20.0, 0.0, 1.0),
-            point(30.0, 0.0, 1.0),
-        ];
-        let outline = SimpleStrokeOutline::new_with_path(
-            &points,
-            BrushTip::FixedRound(RoundTip::new(2.0)),
-            StrokeOutlineOptions::default(),
-        );
-
-        assert_eq!(outline.cached_start, 2);
-        assert_eq!(outline.cached_points.len(), 2);
     }
 
     #[test]
