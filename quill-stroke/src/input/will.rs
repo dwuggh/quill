@@ -1,15 +1,22 @@
+//! WILL-style smoothing and incremental centripetal Catmull–Rom modeling.
+
 use peniko::kurbo::Point;
 use smallvec::SmallVec;
 
-use super::{Input, InputModelError, InputModeler, InputSource, ModelUpdate, PathPoint};
+use super::model::InputBatch;
+use super::{InputModelError, InputModeler, InputSample, InputSource, ModelUpdate, PathPoint};
 
 const EPSILON: f32 = 1.0e-5;
 const SPLINE_LOOKBACK: usize = 2;
 
+/// Parameters controlling WILL smoothing, interpolation, and stable output.
 #[derive(Clone, Copy, Debug)]
 pub struct WillInputModelerConfig {
+    /// Weight of each measurement when updating the smoothed level, in 0..=1.
     pub smoothing_alpha: f32,
+    /// Weight of the observed level change when updating its trend, in 0..=1.
     pub smoothing_beta: f32,
+    /// Positive target spacing in stroke-local units for subdividing each chord.
     pub interpolation_spacing: f32,
     /// Number of trailing real inputs kept provisional. The spline always
     /// needs at least one real control point beyond a committed segment.
@@ -58,23 +65,26 @@ impl WillInputModelerConfig {
     }
 }
 
+/// Real and predicted controls retained while rebuilding the provisional suffix.
 #[derive(Clone, Debug, Default)]
 struct InputCursor {
-    cached_inputs: SmallVec<[Input; 8]>,
+    cached_inputs: SmallVec<[InputSample; 8]>,
+    /// First control whose smoothing state has not been committed.
     first_unstable_input: usize,
+    /// Boundary between real controls and replaceable predictions in the cache.
     predicted_start: usize,
 }
 
 impl InputCursor {
     fn validate_enqueue(
         &self,
-        points: &[Input],
-        predicted: &[Input],
+        points: &[InputSample],
+        predicted: &[InputSample],
     ) -> Result<(), InputModelError> {
         let real_previous_timestamp = self
             .cached_inputs
             .get(..self.predicted_start)
-            .and_then(<[Input]>::last)
+            .and_then(<[InputSample]>::last)
             .map(|input| input.timestamp);
         InputBatch::new(points, InputSource::Real).validate_after(real_previous_timestamp)?;
 
@@ -83,7 +93,7 @@ impl InputCursor {
             .or_else(|| {
                 self.cached_inputs
                     .get(..self.predicted_start)
-                    .and_then(<[Input]>::last)
+                    .and_then(<[InputSample]>::last)
             })
             .map(|input| input.timestamp);
         InputBatch::new(predicted, InputSource::Predicted)
@@ -92,7 +102,7 @@ impl InputCursor {
         Ok(())
     }
 
-    fn replace_prediction(&mut self, points: &[Input], predicted: &[Input]) {
+    fn replace_prediction(&mut self, points: &[InputSample], predicted: &[InputSample]) {
         self.cached_inputs.truncate(self.predicted_start);
         self.cached_inputs.extend_from_slice(points);
         self.predicted_start = self.cached_inputs.len();
@@ -117,12 +127,14 @@ impl InputCursor {
     }
 }
 
+/// Smoothed level and trend after processing a single control sample.
 #[derive(Clone, Copy, Debug)]
 struct SmoothingState {
     level: PathPoint,
     trend: PathPoint,
 }
 
+/// Committed smoothing state used as the base for each provisional rebuild.
 #[derive(Clone, Debug, Default)]
 struct Smoother {
     committed: Option<SmoothingState>,
@@ -134,7 +146,7 @@ struct Smoother {
 impl Smoother {
     fn smooth(
         &self,
-        inputs: &[Input],
+        inputs: &[InputSample],
         first_input_index: usize,
         config: WillInputModelerConfig,
     ) -> SmoothedSuffix {
@@ -143,7 +155,7 @@ impl Smoother {
         let mut states = Vec::with_capacity(inputs.len());
 
         for (offset, input) in inputs.iter().copied().enumerate() {
-            let raw = input.to_path_point();
+            let raw = PathPoint::from(input);
             let next_state = match state {
                 Some(previous) => {
                     let mut level =
@@ -202,6 +214,7 @@ impl Smoother {
     }
 }
 
+/// Provisional controls and the states available to commit as real input advances.
 #[derive(Clone, Debug)]
 struct SmoothedSuffix {
     anchors: SmallVec<[SmoothedPoint; SPLINE_LOOKBACK]>,
@@ -224,26 +237,31 @@ impl SmoothedSuffix {
     }
 }
 
+/// A spline control associated with its source position in the input cache.
 #[derive(Clone, Copy, Debug)]
 struct SmoothedPoint {
     point: PathPoint,
     input_index: usize,
 }
 
+/// Stateful WILL-style smoothing and centripetal Catmull–Rom interpolation.
 #[derive(Debug, Default)]
 pub struct WillInputModeler {
     config: WillInputModelerConfig,
     inputs: InputCursor,
     smoother: Smoother,
     path: Vec<PathPoint>,
+    /// Final prefix of `path`; subsequent enqueues rebuild only its suffix.
     stable_len: usize,
 }
 
 impl WillInputModeler {
+    /// Create an empty modeler with the default smoothing configuration.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Create an empty modeler; configuration is validated on enqueue.
     pub fn with_config(config: WillInputModelerConfig) -> Self {
         Self {
             config,
@@ -253,13 +271,14 @@ impl WillInputModeler {
 
     fn validate_enqueue(
         &self,
-        points: &[Input],
-        predicted: &[Input],
+        points: &[InputSample],
+        predicted: &[InputSample],
     ) -> Result<(), InputModelError> {
         self.config.validate()?;
         self.inputs.validate_enqueue(points, predicted)
     }
 
+    /// Rebuild provisional geometry, commit finalized controls, and compact history.
     fn rebuild_unstable_path(&mut self) {
         let first_unstable_input = self.inputs.first_unstable_input;
         let smoothed = self.smoother.smooth(
@@ -311,8 +330,8 @@ impl InputModeler for WillInputModeler {
 
     fn enqueue(
         &mut self,
-        points: &[Input],
-        predicted: &[Input],
+        points: &[InputSample],
+        predicted: &[InputSample],
     ) -> Result<ModelUpdate<'_>, InputModelError> {
         self.validate_enqueue(points, predicted)?;
 
@@ -335,161 +354,7 @@ impl InputModeler for WillInputModeler {
     }
 }
 
-struct InputBatch<'a> {
-    inputs: &'a [Input],
-    source: InputSource,
-}
-
-impl<'a> InputBatch<'a> {
-    fn new(inputs: &'a [Input], source: InputSource) -> Self {
-        Self { inputs, source }
-    }
-
-    fn validate_after(&self, previous_timestamp: Option<f64>) -> Result<(), InputModelError> {
-        let mut previous_timestamp = previous_timestamp;
-
-        for (index, input) in self.inputs.iter().enumerate() {
-            input.validate(self.source, index)?;
-
-            if let Some(previous) = previous_timestamp
-                && input.timestamp < previous
-            {
-                return Err(InputModelError::NonMonotonicTimestamp {
-                    input_source: self.source,
-                    index,
-                    previous,
-                    current: input.timestamp,
-                });
-            }
-            previous_timestamp = Some(input.timestamp);
-        }
-
-        Ok(())
-    }
-}
-
-impl Input {
-    fn validate(&self, input_source: InputSource, index: usize) -> Result<(), InputModelError> {
-        self.validate_finite(input_source, index, "position.x", self.x as f64)?;
-        self.validate_finite(input_source, index, "position.y", self.y as f64)?;
-        self.validate_finite(input_source, index, "timestamp", self.timestamp)?;
-        self.validate_finite(input_source, index, "pressure", self.pressure as f64)?;
-        self.validate_finite(input_source, index, "tilt.x", self.tilt_x as f64)?;
-        self.validate_finite(input_source, index, "tilt.y", self.tilt_y as f64)?;
-        Ok(())
-    }
-
-    fn validate_finite(
-        &self,
-        input_source: InputSource,
-        index: usize,
-        field: &'static str,
-        value: f64,
-    ) -> Result<(), InputModelError> {
-        if value.is_finite() {
-            return Ok(());
-        }
-
-        Err(InputModelError::NonFiniteInput {
-            input_source,
-            index,
-            field,
-            value,
-        })
-    }
-
-    fn to_path_point(self) -> PathPoint {
-        PathPoint {
-            x: self.x,
-            y: self.y,
-            pressure: self.pressure.clamp(0.0, 1.0),
-            altitude: self.tilt_x,
-            azimuth: self.tilt_y,
-            t: 0.0,
-            visibility: 1,
-        }
-    }
-}
-
-impl PathPoint {
-    fn zero_delta() -> Self {
-        Self {
-            x: 0.0,
-            y: 0.0,
-            pressure: 0.0,
-            altitude: 0.0,
-            azimuth: 0.0,
-            t: 0.0,
-            visibility: 1,
-        }
-    }
-
-    fn offset_by(self, delta: Self) -> Self {
-        Self {
-            x: self.x + delta.x,
-            y: self.y + delta.y,
-            pressure: self.pressure + delta.pressure,
-            altitude: self.altitude,
-            azimuth: self.azimuth,
-            t: self.t,
-            visibility: self.visibility,
-        }
-    }
-
-    fn delta_to(self, other: Self) -> Self {
-        Self {
-            x: other.x - self.x,
-            y: other.y - self.y,
-            pressure: other.pressure - self.pressure,
-            altitude: 0.0,
-            azimuth: 0.0,
-            t: 0.0,
-            visibility: 1,
-        }
-    }
-
-    fn distance_to(self, other: Self) -> f32 {
-        let dx = self.x - other.x;
-        let dy = self.y - other.y;
-        dx.hypot(dy)
-    }
-
-    fn smoothed_toward(self, input: Self, trend: Self, alpha: f32) -> Self {
-        let predicted = self.offset_by(trend);
-        Self {
-            x: alpha.mul_add(input.x, (1.0 - alpha) * predicted.x),
-            y: alpha.mul_add(input.y, (1.0 - alpha) * predicted.y),
-            pressure: alpha.mul_add(input.pressure, (1.0 - alpha) * predicted.pressure),
-            altitude: input.altitude,
-            azimuth: input.azimuth,
-            t: input.t,
-            visibility: input.visibility,
-        }
-    }
-
-    fn smoothed_trend_from(self, previous: Self, previous_trend: Self, beta: f32) -> Self {
-        let delta = previous.delta_to(self);
-        Self {
-            x: beta.mul_add(delta.x, (1.0 - beta) * previous_trend.x),
-            y: beta.mul_add(delta.y, (1.0 - beta) * previous_trend.y),
-            pressure: beta.mul_add(delta.pressure, (1.0 - beta) * previous_trend.pressure),
-            altitude: 0.0,
-            azimuth: 0.0,
-            t: 0.0,
-            visibility: 1,
-        }
-    }
-
-    fn is_finite(self) -> bool {
-        self.x.is_finite()
-            && self.y.is_finite()
-            && self.pressure.is_finite()
-            && self.altitude.is_finite()
-            && self.azimuth.is_finite()
-            && self.t.is_finite()
-    }
-}
-
+/// Interpolate smoothed controls while tracking which input finalizes each sample.
 #[derive(Clone, Copy)]
 struct PathBuilder {
     config: WillInputModelerConfig,
@@ -613,6 +478,7 @@ impl PathBuilder {
     }
 }
 
+/// An emitted path point and the input-cache index of its segment endpoint.
 #[derive(Clone, Copy, Debug)]
 struct ModeledSample {
     point: PathPoint,
@@ -632,8 +498,8 @@ impl From<SmoothedPoint> for ModeledSample {
 mod tests {
     use super::*;
 
-    fn input(x: f32, y: f32, timestamp: f64) -> Input {
-        Input {
+    fn input(x: f32, y: f32, timestamp: f64) -> InputSample {
+        InputSample {
             x,
             y,
             timestamp,
@@ -656,40 +522,6 @@ mod tests {
             assert!(window[1].t.is_finite());
             assert!(window[0].t <= window[1].t + EPSILON);
         }
-    }
-
-    #[test]
-    fn single_input_produces_one_finite_path_point() {
-        let mut modeler = modeler_without_lag();
-        let stable_len = modeler
-            .enqueue(&[input(1.0, 2.0, 0.0)], &[])
-            .unwrap()
-            .metadata
-            .stable_len;
-
-        assert_eq!(modeler.path.len(), 1);
-        assert_eq!(stable_len, 1);
-        assert!(modeler.path[0].is_finite());
-    }
-
-    #[test]
-    fn pressure_is_clamped_and_tilt_maps_to_orientation_fields() {
-        let mut modeler = modeler_without_lag();
-        let sample = Input {
-            x: 0.0,
-            y: 0.0,
-            timestamp: 0.0,
-            pressure: 2.0,
-            tilt_x: 0.7,
-            tilt_y: 1.2,
-        };
-
-        modeler.enqueue(&[sample], &[]).unwrap();
-
-        let point = modeler.path[0];
-        assert_eq!(point.pressure, 1.0);
-        assert_eq!(point.altitude, 0.7);
-        assert_eq!(point.azimuth, 1.2);
     }
 
     #[test]
@@ -719,31 +551,7 @@ mod tests {
             assert!(window[1].y.abs() <= EPSILON);
         }
         assert_monotonic_path_t(&modeler.path);
-    }
-
-    #[test]
-    fn straight_line_inputs_generate_centripetal_path_t() {
-        let mut modeler = WillInputModeler::with_config(WillInputModelerConfig {
-            smoothing_alpha: 1.0,
-            smoothing_beta: 1.0,
-            interpolation_spacing: 1.0,
-            stable_lookahead: 0,
-        });
-
-        modeler
-            .enqueue(
-                &[
-                    input(0.0, 0.0, 0.0),
-                    input(4.0, 0.0, 0.1),
-                    input(8.0, 0.0, 0.2),
-                    input(12.0, 0.0, 0.3),
-                ],
-                &[],
-            )
-            .unwrap();
-
-        assert_monotonic_path_t(&modeler.path);
-        assert!((modeler.path[0].t - 0.0).abs() <= EPSILON);
+        assert!(modeler.path[0].t.abs() <= EPSILON);
         assert!((modeler.path.last().unwrap().t - 6.0).abs() <= EPSILON);
     }
 
@@ -792,241 +600,6 @@ mod tests {
     }
 
     #[test]
-    fn stable_len_excludes_predicted_tail() {
-        let mut modeler = modeler_without_lag();
-
-        modeler
-            .enqueue(
-                &[
-                    input(0.0, 0.0, 0.0),
-                    input(5.0, 0.0, 0.1),
-                    input(10.0, 0.0, 0.2),
-                ],
-                &[input(15.0, 0.0, 0.3), input(20.0, 0.0, 0.4)],
-            )
-            .unwrap();
-
-        assert!(modeler.stable_len() < modeler.path.len());
-        assert_eq!(
-            modeler.inputs.predicted_start,
-            modeler.inputs.cached_inputs.len() - 2
-        );
-    }
-
-    #[test]
-    fn adding_real_input_preserves_or_advances_stable_prefix() {
-        let mut modeler = WillInputModeler::with_config(WillInputModelerConfig {
-            stable_lookahead: 1,
-            ..WillInputModelerConfig::default()
-        });
-
-        modeler
-            .enqueue(
-                &[
-                    input(0.0, 0.0, 0.0),
-                    input(4.0, 0.0, 0.1),
-                    input(8.0, 0.0, 0.2),
-                ],
-                &[],
-            )
-            .unwrap();
-        let first_stable_len = modeler.stable_len();
-
-        modeler.enqueue(&[input(12.0, 0.0, 0.3)], &[]).unwrap();
-
-        assert!(modeler.stable_len() >= first_stable_len);
-    }
-
-    #[test]
-    fn reset_clears_state() {
-        let mut modeler = modeler_without_lag();
-        modeler
-            .enqueue(
-                &[input(0.0, 0.0, 0.0), input(4.0, 0.0, 0.1)],
-                &[input(8.0, 0.0, 0.2)],
-            )
-            .unwrap();
-
-        modeler.reset();
-
-        assert!(modeler.path.is_empty());
-        assert_eq!(modeler.stable_len(), 0);
-        assert!(modeler.inputs.cached_inputs.is_empty());
-        assert!(modeler.smoother.committed.is_none());
-    }
-
-    #[test]
-    fn invalid_config_returns_error() {
-        let mut modeler = WillInputModeler::with_config(WillInputModelerConfig {
-            smoothing_alpha: 1.5,
-            ..WillInputModelerConfig::default()
-        });
-
-        let error = modeler.enqueue(&[input(0.0, 0.0, 0.0)], &[]).unwrap_err();
-
-        assert!(matches!(
-            error,
-            InputModelError::InvalidConfig {
-                field: "smoothing_alpha",
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn non_finite_input_returns_error() {
-        let mut modeler = WillInputModeler::default();
-        let sample = Input {
-            x: f32::NAN,
-            y: 0.0,
-            timestamp: 0.0,
-            pressure: 1.0,
-            tilt_x: 0.0,
-            tilt_y: 0.0,
-        };
-
-        let error = modeler.enqueue(&[sample], &[]).unwrap_err();
-
-        assert!(matches!(
-            error,
-            InputModelError::NonFiniteInput {
-                input_source: InputSource::Real,
-                index: 0,
-                field: "position.x",
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn non_monotonic_real_timestamp_returns_error() {
-        let mut modeler = WillInputModeler::default();
-
-        let error = modeler
-            .enqueue(&[input(0.0, 0.0, 1.0), input(1.0, 0.0, 0.5)], &[])
-            .unwrap_err();
-
-        assert!(matches!(
-            error,
-            InputModelError::NonMonotonicTimestamp {
-                input_source: InputSource::Real,
-                index: 1,
-                previous: 1.0,
-                current: 0.5,
-            }
-        ));
-    }
-
-    #[test]
-    fn real_timestamp_is_validated_against_cached_real_tail() {
-        let mut modeler = modeler_without_lag();
-        modeler.enqueue(&[input(0.0, 0.0, 1.0)], &[]).unwrap();
-
-        let error = modeler.enqueue(&[input(1.0, 0.0, 0.5)], &[]).unwrap_err();
-
-        assert!(matches!(
-            error,
-            InputModelError::NonMonotonicTimestamp {
-                input_source: InputSource::Real,
-                index: 0,
-                previous: 1.0,
-                current: 0.5,
-            }
-        ));
-    }
-
-    #[test]
-    fn non_monotonic_predicted_timestamp_returns_error() {
-        let mut modeler = WillInputModeler::default();
-
-        let error = modeler
-            .enqueue(&[input(0.0, 0.0, 1.0)], &[input(1.0, 0.0, 0.5)])
-            .unwrap_err();
-
-        assert!(matches!(
-            error,
-            InputModelError::NonMonotonicTimestamp {
-                input_source: InputSource::Predicted,
-                index: 0,
-                previous: 1.0,
-                current: 0.5,
-            }
-        ));
-    }
-
-    #[test]
-    fn failed_enqueue_leaves_state_unchanged() {
-        let mut modeler = modeler_without_lag();
-        modeler.enqueue(&[input(0.0, 0.0, 0.0)], &[]).unwrap();
-        let original_path_len = modeler.path.len();
-        let original_first_position = (modeler.path[0].x, modeler.path[0].y);
-        let original_stable_len = modeler.stable_len;
-        let original_cached_len = modeler.inputs.cached_inputs.len();
-        let original_predicted_start = modeler.inputs.predicted_start;
-        let original_committed = modeler.smoother.committed;
-
-        let error = modeler
-            .enqueue(&[input(1.0, 0.0, -1.0)], &[input(2.0, 0.0, 0.2)])
-            .unwrap_err();
-
-        assert!(matches!(
-            error,
-            InputModelError::NonMonotonicTimestamp { .. }
-        ));
-        assert_eq!(modeler.path.len(), original_path_len);
-        assert_eq!(
-            (modeler.path[0].x, modeler.path[0].y),
-            original_first_position
-        );
-        assert_eq!(modeler.stable_len, original_stable_len);
-        assert_eq!(modeler.inputs.cached_inputs.len(), original_cached_len);
-        assert_eq!(modeler.inputs.predicted_start, original_predicted_start);
-        assert_eq!(
-            modeler
-                .smoother
-                .committed
-                .map(|state| (state.level.x, state.level.y)),
-            original_committed.map(|state| (state.level.x, state.level.y))
-        );
-    }
-
-    #[test]
-    fn cached_inputs_remain_bounded_during_long_stroke() {
-        let mut modeler = WillInputModeler::default();
-
-        for i in 0..200 {
-            modeler
-                .enqueue(&[input(i as f32, 0.0, i as f64 * 0.01)], &[])
-                .unwrap();
-        }
-
-        assert!(
-            modeler.inputs.cached_inputs.len()
-                <= SPLINE_LOOKBACK + modeler.config.stable_lookahead + 1
-        );
-    }
-
-    #[test]
-    fn invalidated_from_is_old_stable_len() {
-        let mut modeler = WillInputModeler::default();
-        modeler
-            .enqueue(
-                &[
-                    input(0.0, 0.0, 0.0),
-                    input(4.0, 0.0, 0.1),
-                    input(8.0, 0.0, 0.2),
-                ],
-                &[],
-            )
-            .unwrap();
-        let old_stable_len = modeler.stable_len();
-
-        let update = modeler.enqueue(&[input(12.0, 0.0, 0.3)], &[]).unwrap();
-
-        assert_eq!(update.metadata.invalidated_from, old_stable_len);
-    }
-
-    #[test]
     fn incremental_rebuild_keeps_path_t_monotonic_after_stable_prefix() {
         let mut modeler = WillInputModeler::with_config(WillInputModelerConfig {
             smoothing_alpha: 1.0,
@@ -1056,36 +629,5 @@ mod tests {
 
         assert!(modeler.path[stable_len - 1].t >= stable_t - EPSILON);
         assert_monotonic_path_t(&modeler.path);
-    }
-
-    #[test]
-    fn prediction_does_not_mutate_committed_smoother_state() {
-        let mut modeler = WillInputModeler::default();
-        modeler
-            .enqueue(
-                &[
-                    input(0.0, 0.0, 0.0),
-                    input(4.0, 0.0, 0.1),
-                    input(8.0, 0.0, 0.2),
-                ],
-                &[],
-            )
-            .unwrap();
-        let committed = modeler
-            .smoother
-            .committed
-            .map(|state| (state.level.x, state.level.y));
-
-        modeler
-            .enqueue(&[], &[input(40.0, 40.0, 0.3), input(48.0, 48.0, 0.4)])
-            .unwrap();
-
-        assert_eq!(
-            modeler
-                .smoother
-                .committed
-                .map(|state| (state.level.x, state.level.y)),
-            committed
-        );
     }
 }

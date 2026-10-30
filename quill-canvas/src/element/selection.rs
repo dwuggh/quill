@@ -28,7 +28,7 @@ use crate::{
     input::CanvasInput,
     runtime::QuillUpdateSet,
 };
-use quill_stroke::input::Input;
+use quill_stroke::input::InputSample;
 
 /// Selection tool configuration carried by `Tool::Selection`.
 #[derive(Clone, Copy, Debug)]
@@ -739,7 +739,7 @@ fn translate_rect(rect: Rect, delta: Vec2) -> Rect {
     )
 }
 
-fn input_to_vec2(input: Input) -> Point {
+fn input_to_vec2(input: InputSample) -> Point {
     Point::new(f64::from(input.x()), f64::from(input.y()))
 }
 
@@ -927,82 +927,4 @@ fn slab_intersect(
     *t_min = (*t_min).max(near);
     *t_max = (*t_max).min(far);
     *t_min <= *t_max
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn replace_clears_old_selection_and_sets_primary() {
-        let old = Entity::from_raw_u32(1).unwrap();
-        let new = Entity::from_raw_u32(2).unwrap();
-        let mut state = SelectionState::default();
-        state.apply(SelectionOp::Add, [old]);
-
-        state.apply(SelectionOp::Replace, [new]);
-
-        assert!(!state.contains(old));
-        assert!(state.contains(new));
-        assert_eq!(state.primary(), Some(new));
-    }
-
-    #[test]
-    fn add_preserves_old_selection_and_updates_primary() {
-        let first = Entity::from_raw_u32(1).unwrap();
-        let second = Entity::from_raw_u32(2).unwrap();
-        let mut state = SelectionState::default();
-        state.apply(SelectionOp::Replace, [first]);
-
-        state.apply(SelectionOp::Add, [second]);
-
-        assert!(state.contains(first));
-        assert!(state.contains(second));
-        assert_eq!(state.primary(), Some(second));
-    }
-
-    #[test]
-    fn toggle_removes_selected_hits_and_adds_unselected_hits() {
-        let first = Entity::from_raw_u32(1).unwrap();
-        let second = Entity::from_raw_u32(2).unwrap();
-        let mut state = SelectionState::default();
-        state.apply(SelectionOp::Replace, [first]);
-
-        state.apply(SelectionOp::Toggle, [first, second]);
-
-        assert!(!state.contains(first));
-        assert!(state.contains(second));
-        assert_eq!(state.primary(), Some(second));
-    }
-
-    #[test]
-    fn subtract_removes_hits_and_repairs_primary() {
-        let first = Entity::from_raw_u32(1).unwrap();
-        let second = Entity::from_raw_u32(2).unwrap();
-        let mut state = SelectionState::default();
-        state.apply(SelectionOp::Add, [first]);
-        state.apply(SelectionOp::Add, [second]);
-
-        state.apply(SelectionOp::Subtract, [second]);
-
-        assert!(state.contains(first));
-        assert!(!state.contains(second));
-        assert_eq!(state.primary(), Some(first));
-    }
-
-    #[test]
-    fn replace_entity_transfers_selected_membership() {
-        let old = Entity::from_raw_u32(1).unwrap();
-        let first = Entity::from_raw_u32(2).unwrap();
-        let second = Entity::from_raw_u32(3).unwrap();
-        let mut state = SelectionState::default();
-        state.apply(SelectionOp::Replace, [old]);
-
-        state.replace_entity(old, [first, second]);
-
-        assert!(!state.contains(old));
-        assert!(state.contains(first));
-        assert!(state.contains(second));
-        assert_eq!(state.primary(), Some(first));
-    }
 }

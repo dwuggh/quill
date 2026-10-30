@@ -12,7 +12,7 @@ use bevy_ecs::{
 use peniko::kurbo::Point;
 use quill_stroke::{
     brush::Brush,
-    input::{Input, ModelUpdate, ModelUpdateMeta, PathPoint},
+    input::{InputSample, ModelUpdate, ModelUpdateMeta, PathPoint},
 };
 
 use crate::{
@@ -203,7 +203,7 @@ pub(crate) fn process_stroke_msg(
 fn update_active_path(
     commands: &mut Commands,
     entity: Entity,
-    input: Input,
+    input: InputSample,
     modeler: &mut GlobalInputModeler,
     paths: &mut Query<(&mut StrokeData, Option<&mut RectBound>)>,
     errors: &mut CanvasErrors,
@@ -277,15 +277,15 @@ fn point_to_canvas_point(point: PathPoint) -> Point {
     Point::new(f64::from(point.x()), f64::from(point.y()))
 }
 
-fn input_to_vec2(input: Input) -> Point {
+fn input_to_vec2(input: InputSample) -> Point {
     Point::new(f64::from(input.x()), f64::from(input.y()))
 }
 
 fn input_in_owner(
-    input: Input,
+    input: InputSample,
     owner: Entity,
     parents: &Query<(Option<&CanvasTransform>, Option<&ChildOf>)>,
-) -> Option<Input> {
+) -> Option<InputSample> {
     let local = owner_point_from_root_query(owner, input_to_vec2(input), parents)?;
     Some(input.with_position(local.x as f32, local.y as f32))
 }

@@ -43,7 +43,7 @@ use quill_canvas::{
     input::CanvasInput,
     runtime::QuillUpdateSet,
 };
-use quill_stroke::{gpu::ERASER_SHADER, input::Input};
+use quill_stroke::{gpu::ERASER_SHADER, input::InputSample};
 
 const CIRCLE_SHAPE: u32 = 0;
 const SQUARE_SHAPE: u32 = 1;
@@ -227,7 +227,7 @@ fn update_eraser_preview(
     }
 }
 
-fn input_to_vec2(input: Input) -> Vec2 {
+fn input_to_vec2(input: InputSample) -> Vec2 {
     Vec2::new(input.x(), input.y())
 }
 

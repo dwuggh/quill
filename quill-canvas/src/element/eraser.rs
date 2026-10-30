@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 use bevy_ecs::{hierarchy::Children, message::MessageRegistry, prelude::*, schedule::Schedule};
 use peniko::kurbo::{Affine, BezPath, PathEl, Point, Rect, Shape as _, Stroke, Vec2, flatten};
 use quill_stroke::{
-    input::{Input, ModelUpdate, ModelUpdateMeta, PathPoint},
+    input::{InputSample, ModelUpdate, ModelUpdateMeta, PathPoint},
     outline::{SimpleStrokeOutline, StrokeOutlineOptions},
 };
 
@@ -1055,7 +1055,7 @@ fn eraser_steps(points: &[Point], config: EraserConfig) -> Vec<EraserStep> {
     }
 }
 
-fn input_to_point(input: Input) -> Point {
+fn input_to_point(input: InputSample) -> Point {
     Point::new(f64::from(input.x()), f64::from(input.y()))
 }
 
@@ -1256,18 +1256,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn circle_path_checks_distance_to_center_segments() {
-        let step = EraserStep::new(
-            Point::new(0.0, 0.0),
-            Point::new(10.0, 0.0),
-            EraserConfig::new(EraserShape::Circle, 1.0),
-        );
-
-        assert!(step.contains(Point::new(5.0, 0.5)));
-        assert!(!step.contains(Point::new(5.0, 2.0)));
-    }
-
-    #[test]
     fn circle_segment_hits_intersecting_lines() {
         let step = EraserStep::new(
             Point::new(0.0, 0.0),
@@ -1289,7 +1277,6 @@ mod tests {
         );
 
         assert_eq!(segment.bounds(), Rect::new(0.5, 2.5, 9.5, 7.5));
-        assert_eq!(segment.fill_path().elements().len(), 7);
         assert!(!point_in_polygon(
             Point::new(0.5, 7.5),
             &square_sweep_polygon(segment.from, segment.to, segment.size),

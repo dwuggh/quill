@@ -7,7 +7,7 @@
 use bevy_asset::Handle;
 use bevy_ecs::prelude::*;
 use peniko::kurbo::Size;
-use quill_stroke::input::{Input, InputModeler, WillInputModeler};
+use quill_stroke::input::{InputModeler, InputSample, WillInputModeler};
 
 use crate::{
     asset::CanvasImage,
@@ -42,11 +42,11 @@ pub enum CanvasInput {
     /// Pointer left the canvas.
     PointerLeave,
     /// Pointer moved, optionally extending the active stroke.
-    PointerMove(Input),
+    PointerMove(InputSample),
     /// Pointer pressed, creating content according to the current tool.
-    PointerDown(Input),
+    PointerDown(InputSample),
     /// Pointer released, finalizing any active stroke.
-    PointerUp(Input),
+    PointerUp(InputSample),
 }
 
 /// Non-pointer canvas commands.

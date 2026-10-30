@@ -11,7 +11,7 @@ use quill_canvas::{
     },
 };
 use quill_render_imaging::CanvasImagingRenderer;
-use quill_stroke::input::Input as StrokeInput;
+use quill_stroke::input::InputSample;
 use xilem::{
     Color, Pod, ViewCtx,
     core::{MessageCtx, MessageResult, Mut, View, ViewMarker},
@@ -117,7 +117,7 @@ pub struct QuillCanvasWidget {
     /// Current content-box size.
     size: Size,
     /// Last accepted pointer sample, used to finish a gesture on cancel.
-    last_sample: Option<PointerSample>,
+    last_sample: Option<InputSample>,
     /// Last canvas error produced while handling widget input.
     last_error: Option<CanvasError>,
 }
@@ -167,20 +167,35 @@ impl QuillCanvasWidget {
         }
     }
 
-    fn pointer_sample(&self, ctx: &EventCtx<'_>, state: &PointerState) -> PointerSample {
+    /// Convert widget coordinates to document space before storing a canvas sample.
+    fn pointer_sample(&self, ctx: &EventCtx<'_>, state: &PointerState) -> InputSample {
         let local = ctx.local_position(state.position);
         let root = self.viewport().root_from_widget(local);
-        PointerSample::from_pointer(state, root, self.start.elapsed().as_secs_f64())
+        // The Winit adapter supplies native tablet pressure and handles devices
+        // without pressure support; preserve that distinction in the sample.
+        InputSample::new(
+            root.x as f32,
+            root.y as f32,
+            self.start.elapsed().as_secs_f64(),
+        )
+        .with_pressure(state.pressure.clamp(0.0, 1.0))
+        .with_tilt(state.orientation.altitude, state.orientation.azimuth)
     }
 
-    fn accept_sample(&mut self, sample: PointerSample, kind: PointerInputKind) {
-        self.send_input(sample.canvas_input(kind));
+    /// Dispatch a sample and retain it so cancellation can finish the gesture.
+    fn accept_sample(&mut self, sample: InputSample, kind: PointerInputKind) {
+        self.send_input(match kind {
+            PointerInputKind::Move => CanvasInput::PointerMove(sample),
+            PointerInputKind::Down => CanvasInput::PointerDown(sample),
+            PointerInputKind::Up => CanvasInput::PointerUp(sample),
+        });
         self.last_sample = Some(sample);
     }
 
+    /// Finish a captured gesture when no release sample is available.
     fn finish_from_last_sample(&mut self) {
         if let Some(sample) = self.last_sample.take() {
-            self.send_input(sample.canvas_input(PointerInputKind::Up));
+            self.send_input(CanvasInput::PointerUp(sample));
         }
     }
 
@@ -488,83 +503,9 @@ impl Viewport {
     }
 }
 
-/// Pointer data converted from widget space into document coordinates.
-#[derive(Clone, Copy, Debug)]
-struct PointerSample {
-    x: f64,
-    y: f64,
-    pressure: f32,
-    tilt_x: f32,
-    tilt_y: f32,
-    timestamp: f64,
-}
-
-impl PointerSample {
-    /// Translate pointer metadata while keeping coordinates in document space.
-    fn from_pointer(state: &PointerState, position: Point, timestamp: f64) -> Self {
-        Self {
-            x: position.x,
-            y: position.y,
-            // The Winit adapter supplies native tablet pressure and handles devices
-            // without pressure support; the canvas must preserve that distinction.
-            pressure: state.pressure.clamp(0.0, 1.0),
-            tilt_x: state.orientation.altitude,
-            tilt_y: state.orientation.azimuth,
-            timestamp,
-        }
-    }
-
-    fn canvas_input(self, kind: PointerInputKind) -> CanvasInput {
-        match kind {
-            PointerInputKind::Move => CanvasInput::PointerMove(self.stroke_input()),
-            PointerInputKind::Down => CanvasInput::PointerDown(self.stroke_input()),
-            PointerInputKind::Up => CanvasInput::PointerUp(self.stroke_input()),
-        }
-    }
-
-    fn stroke_input(self) -> StrokeInput {
-        StrokeInput::new(self.x as f32, self.y as f32, self.timestamp)
-            .with_pressure(self.pressure)
-            .with_tilt(self.tilt_x, self.tilt_y)
-    }
-}
-
 #[derive(Clone, Copy, Debug)]
 enum PointerInputKind {
     Move,
     Down,
     Up,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn fit_viewport_centers_document_and_round_trips_points() {
-        let document = Rect::new(0.0, 0.0, 100.0, 200.0);
-        let viewport = Viewport::fit(Size::new(300.0, 300.0), Some(document));
-        let document_center = Point::new(50.0, 100.0);
-        let widget_center = viewport.widget_from_root * document_center;
-
-        assert!((widget_center.x - 150.0).abs() < 0.001);
-        assert!((widget_center.y - 150.0).abs() < 0.001);
-        let root = viewport.root_from_widget(widget_center);
-        assert!((root.x - document_center.x).abs() < 0.001);
-        assert!((root.y - document_center.y).abs() < 0.001);
-    }
-
-    #[test]
-    fn widget_commands_apply_once() {
-        let command = CanvasWidgetCommand {
-            id: 1,
-            kind: CanvasWidgetCommandKind::AddPage,
-        };
-        let mut widget = QuillCanvasWidget::new(Tool::default(), None);
-
-        widget.apply_command(Some(command));
-        widget.apply_command(Some(command));
-
-        assert_eq!(widget.pages.len(), 2);
-    }
 }

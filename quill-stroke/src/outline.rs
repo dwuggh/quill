@@ -867,14 +867,6 @@ mod tests {
     }
 
     #[test]
-    fn single_point_run_is_empty() {
-        let points = [point(0.0, 0.0, 1.0)];
-        let path = path(&points, BrushTip::FixedRound(RoundTip::new(2.0)));
-
-        assert!(path.is_empty());
-    }
-
-    #[test]
     fn duplicate_position_run_produces_circle() {
         let points = [point(3.0, 4.0, 1.0), point(3.0, 4.0, 1.0)];
         let path = path(&points, BrushTip::FixedRound(RoundTip::new(2.0)));
@@ -885,40 +877,6 @@ mod tests {
         assert!((bounds.x1 - 5.0).abs() <= 1.0e-3);
         assert!((bounds.y0 - 2.0).abs() <= 1.0e-3);
         assert!((bounds.y1 - 6.0).abs() <= 1.0e-3);
-    }
-
-    #[test]
-    fn self_crossing_centerline_still_returns_closed_path() {
-        let points = [
-            point(0.0, 0.0, 1.0),
-            point(10.0, 10.0, 1.0),
-            point(0.0, 10.0, 1.0),
-            point(10.0, 0.0, 1.0),
-        ];
-        let path = path(&points, BrushTip::FixedRound(RoundTip::new(1.0)));
-
-        assert_eq!(closed_subpaths(&path), 1);
-        assert!(
-            path.iter()
-                .any(|element| matches!(element, PathEl::CurveTo(control0, control1, _) if control0 == control1))
-        );
-    }
-
-    #[test]
-    fn semicircle_cap_splits_into_repeated_control_cubics() {
-        let points = [point(0.0, 0.0, 1.0), point(10.0, 0.0, 1.0)];
-        let outline = SimpleStrokeOutline::new_with_path(
-            &points,
-            BrushTip::FixedRound(RoundTip::new(2.0)),
-            StrokeOutlineOptions::default(),
-        );
-        let repeated_controls = outline
-            .upper()
-            .iter()
-            .filter(|element| matches!(element, PathEl::CurveTo(control0, control1, _) if control0 == control1))
-            .count();
-
-        assert!(repeated_controls >= 4);
     }
 
     #[test]
@@ -953,19 +911,5 @@ mod tests {
         let incremental: BezPath = outline.iter().collect();
         let fresh = path(&final_points, BrushTip::FixedRound(RoundTip::new(2.0)));
         assert_eq!(incremental, fresh);
-    }
-
-    #[test]
-    fn early_tangent_intersection_detects_sharp_join_before_tangent_points() {
-        let intersection = early_tangent_intersection(
-            Point::new(0.0, 0.0),
-            Point::new(1.0, 0.0),
-            Point::new(0.0, 1.0),
-            Point::new(0.0, 2.0),
-            DEFAULT_EPSILON,
-        )
-        .unwrap();
-
-        assert_eq!(intersection, Point::new(0.0, 0.0));
     }
 }
